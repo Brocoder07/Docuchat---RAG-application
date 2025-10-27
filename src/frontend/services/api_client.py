@@ -2,7 +2,6 @@
 API client for communicating with the backend.
 """
 import requests
-import json
 from typing import Optional, Dict, Any
 from src.frontend.config.settings import config
 
@@ -11,6 +10,7 @@ class APIClient:
     
     def __init__(self):
         self.base_url = config.API_BASE_URL
+        self.timeout = 60  # Increased timeout to 60 seconds
     
     def check_health(self) -> bool:
         """Check if the API is healthy."""
@@ -23,7 +23,8 @@ class APIClient:
     def get_health_info(self) -> Optional[Dict[str, Any]]:
         """Get detailed health information."""
         try:
-            response = requests.get(f"{self.base_url}/health", timeout=5)
+            # Use the direct health endpoint without redirects
+            response = requests.get(f"{self.base_url}/health/", timeout=5)
             if response.status_code == 200:
                 return response.json()
         except (requests.exceptions.RequestException, requests.exceptions.Timeout):
@@ -48,34 +49,11 @@ class APIClient:
                 files=files,
                 timeout=30
             )
-            
-            # Handle the response more carefully
-            if response.status_code == 200:
-                try:
-                    response_data = response.json()
-                    return {
-                        "success": True,
-                        "data": response_data
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        "success": False,
-                        "error": "Invalid response format from server"
-                    }
-            else:
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('detail', 'Unknown error')
-                    return {
-                        "success": False,
-                        "error": error_msg
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        "success": False,
-                        "error": f"Server error: {response.status_code}"
-                    }
-                    
+            return {
+                "success": response.status_code == 200,
+                "data": response.json() if response.status_code == 200 else None,
+                "error": response.json().get('detail') if response.status_code != 200 else None
+            }
         except requests.exceptions.RequestException as e:
             return {
                 "success": False,
@@ -97,7 +75,7 @@ class APIClient:
             response = requests.post(
                 f"{self.base_url}/chat/query",
                 json={"question": question, "top_k": top_k},
-                timeout=30
+                timeout=self.timeout  # Use the increased timeout
             )
             
             if response.status_code == 200:
@@ -111,6 +89,11 @@ class APIClient:
                     "error": response.json().get('detail', 'Unknown error')
                 }
                 
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "error": f"Request timed out after {self.timeout} seconds. The AI is taking longer than expected to process your question."
+            }
         except requests.exceptions.RequestException as e:
             return {
                 "success": False,

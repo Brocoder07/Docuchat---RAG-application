@@ -1,0 +1,6 @@
+# .streamlit/config.toml
+[server]
+headless = true
+
+[runner]
+magicEnabled = false

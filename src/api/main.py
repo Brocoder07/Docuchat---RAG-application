@@ -37,14 +37,14 @@ app.include_router(chat.router)
 async def root():
     """Root endpoint with API information."""
     return {
-        "message": "Welcome to DocuChat - FREE Document Q&A System",
+        "message": "Welcome to DocuChat - AI Document Q&A System",
         "version": api_config.VERSION,
         "cost": "$0.00",
         "features": [
-            "Document upload (PDF, TXT, DOCX, MD)",
-            "Smart Q&A from your documents", 
-            "No API costs - completely free",
-            "Fast and reliable rule-based answers"
+            "Document upload (PDF, TXT, DOCX, MD, XLSX)",
+            "AI-powered Q&A with Ollama LLM",
+            "Local processing - 100% private",
+            "Fast and intelligent answers"
         ]
     }
 

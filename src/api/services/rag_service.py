@@ -20,7 +20,6 @@ class RAGService:
         self.rag_pipeline = RAGPipeline()
         self.is_initialized = False
         self.initialization_error = None
-        self.processed_file_hashes = set()  # Track processed files to prevent duplicates
     
     def initialize(self):
         """Initialize the RAG pipeline."""
@@ -38,11 +37,11 @@ class RAGService:
     async def upload_document(self, file: UploadFile, upload_dir: str) -> UploadResponse:
         """
         Upload and process a document.
-        
+    
         Args:
             file: Uploaded file
             upload_dir: Directory to save files
-            
+        
         Returns:
             Upload response
         """
@@ -54,7 +53,7 @@ class RAGService:
                     status_code=500, 
                     detail=f"Service initialization failed: {str(e)}"
                 )
-        
+    
         # Validate file type
         file_extension = os.path.splitext(file.filename)[1].lower()
         if not file_extension:
@@ -62,43 +61,44 @@ class RAGService:
                 status_code=400,
                 detail="File must have an extension"
             )
-        
+    
         if file_extension not in api_config.ALLOWED_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
                 detail=f"File type '{file_extension}' not supported. Allowed: {', '.join(api_config.ALLOWED_EXTENSIONS)}"
             )
-        
+    
+        # Check for duplicate filenames (basic duplicate prevention)
+        existing_files = os.listdir(upload_dir)
+        for existing_file in existing_files:
+            if file.filename in existing_file:
+                logger.warning(f"Duplicate filename detected: {file.filename}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"A file with name '{file.filename}' has already been uploaded. Please upload a different file or rename this file."
+                )
+            
         # Read and validate file content first
         try:
             contents = await file.read()
-            
+        
             # Check file size
             if len(contents) > api_config.MAX_FILE_SIZE:
                 raise HTTPException(
                     status_code=413,
                     detail=f"File too large. Maximum size is {api_config.MAX_FILE_SIZE / (1024*1024):.1f}MB"
                 )
-            
+        
             # Check if file is empty
             if len(contents) == 0:
                 raise HTTPException(
                     status_code=400,
                     detail="Uploaded file is empty"
                 )
-            
-            # Check for duplicate files based on content hash
-            file_hash = hash(contents)
-            if file_hash in self.processed_file_hashes:
-                logger.info(f"Duplicate file detected: {file.filename}")
-                raise HTTPException(
-                    status_code=400,
-                    detail="This file has already been processed. Please upload a different file."
-                )
-            
-            # Reset file pointer for potential re-reading
+        
+            # Reset file pointer for processing
             await file.seek(0)
-            
+        
         except HTTPException:
             # Re-raise HTTP exceptions
             raise
@@ -108,26 +108,23 @@ class RAGService:
                 status_code=500, 
                 detail=f"Error reading uploaded file: {str(e)}"
             )
-        
+    
         # Create unique filename
         file_id = str(uuid.uuid4())[:8]
         saved_filename = f"{file_id}_{file.filename}"
         file_path = os.path.join(upload_dir, saved_filename)
-        
+    
         try:
             # Save uploaded file
             with open(file_path, "wb") as f:
                 f.write(contents)
-            
+        
             logger.info(f"Saved uploaded file to: {file_path}")
-            
+        
             # Process document through RAG pipeline
             success = self.rag_pipeline.process_document(file_path)
-            
+        
             if success:
-                # Track processed file to prevent duplicates
-                self.processed_file_hashes.add(file_hash)
-                
                 logger.info(f"Successfully processed document: {file.filename}")
                 return UploadResponse(
                     message="Document uploaded and processed successfully",
@@ -140,9 +137,9 @@ class RAGService:
                     os.remove(file_path)
                 raise HTTPException(
                     status_code=500, 
-                    detail="Failed to process document. The document may be corrupted or in an unsupported format."
+                    detail="Failed to process document. The document may be corrupted, in an unsupported format, or contain no extractable text."
                 )
-                
+            
         except HTTPException:
             # Re-raise HTTP exceptions
             raise
@@ -154,10 +151,10 @@ class RAGService:
                     logger.info(f"Cleaned up failed upload: {file_path}")
                 except Exception as cleanup_error:
                     logger.error(f"Failed to clean up file {file_path}: {str(cleanup_error)}")
-            
+        
             logger.error(f"Error processing document {file.filename}: {str(e)}")
             raise HTTPException(
-                status_code=500, 
+                status_code=500,
                 detail=f"Internal server error while processing document: {str(e)}"
             )
     
@@ -203,46 +200,84 @@ class RAGService:
             )
         
         try:
-            logger.info(f"Processing query: '{question}' with top_k={top_k}")
-            
-            # Validate top_k parameter
-            if top_k < 1 or top_k > 20:
-                raise HTTPException(
-                    status_code=400,
-                    detail="top_k must be between 1 and 20"
-                )
-            
             answer, relevant_chunks = self.rag_pipeline.query(
                 question=question,
                 top_k=top_k
             )
-            
+        
             logger.info(f"Query processed successfully. Found {len(relevant_chunks)} relevant chunks")
-            
-            # Calculate confidence based on similarity scores
-            confidence = "low"
-            if relevant_chunks:
-                best_score = relevant_chunks[0][1] if relevant_chunks else 0
-                if best_score > 0.7:
-                    confidence = "high"
-                elif best_score > 0.4:
-                    confidence = "medium"
-                
-                logger.info(f"Best similarity score: {best_score:.4f}, Confidence: {confidence}")
-            else:
-                logger.info("No relevant chunks found for query")
-            
+        
+            # ENHANCED: Calculate confidence based on multiple factors
+            confidence = self._calculate_confidence(relevant_chunks, answer)
+        
             return answer, len(relevant_chunks), confidence
-            
-        except HTTPException:
-            # Re-raise HTTP exceptions
-            raise
+        
         except Exception as e:
             logger.error(f"Error processing query '{question}': {str(e)}")
             raise HTTPException(
                 status_code=500, 
                 detail=f"Error processing your question: {str(e)}"
             )
+        
+    def _calculate_confidence(self, relevant_chunks: List[Tuple[str, float, dict]], answer: str) -> str:
+        """Calculate confidence based on multiple factors."""
+        if not relevant_chunks:
+            return "very low"
+    
+        # Factor 1: Best similarity score (most important)
+        best_score = relevant_chunks[0][1]
+    
+        # Factor 2: Average similarity score of top chunks
+        avg_score = sum(chunk[1] for chunk in relevant_chunks) / len(relevant_chunks)
+    
+        # Factor 3: Number of relevant chunks found
+        chunk_count = len(relevant_chunks)
+    
+        # Factor 4: Answer quality (length and specificity)
+        answer_quality = self._assess_answer_quality(answer)
+    
+        # Calculate weighted confidence score
+        confidence_score = (
+            best_score * 0.5 +        # Best score weight: 50%
+            avg_score * 0.3 +         # Average score weight: 30%
+            (min(chunk_count / 3, 1.0)) * 0.1 +  # Chunk count weight: 10%
+            answer_quality * 0.1      # Answer quality weight: 10%
+        )
+    
+        # Convert to confidence level
+        if confidence_score > 0.7:
+            return "very high"
+        elif confidence_score > 0.55:
+            return "high"
+        elif confidence_score > 0.4:
+            return "medium"
+        elif confidence_score > 0.25:
+            return "low"
+        else:
+            return "very low"
+
+    def _assess_answer_quality(self, answer: str) -> float:
+        """Assess the quality of the generated answer."""
+        if not answer or len(answer.strip()) < 20:
+            return 0.0
+    
+        # Check for generic/unhelpful responses
+        generic_phrases = [
+            "i don't know", "i cannot find", "the context doesn't contain",
+            "based on the document", "according to the documents"
+        ]
+    
+        answer_lower = answer.lower()
+        if any(phrase in answer_lower for phrase in generic_phrases):
+            return 0.3
+    
+        # Score based on answer length and specificity
+        if len(answer) > 100 and " " in answer:  # Reasonable length with spaces
+            return 0.8
+        elif len(answer) > 50:
+            return 0.6
+        else:
+            return 0.4
     
     def get_health_info(self) -> dict:
         """Get system health information."""
@@ -251,24 +286,28 @@ class RAGService:
             if (self.rag_pipeline.embedding_manager.index is not None and 
                 hasattr(self.rag_pipeline.embedding_manager, 'chunks')):
                 docs_loaded = len(self.rag_pipeline.embedding_manager.chunks)
-            
+        
             status = "healthy" if self.is_initialized else "unhealthy"
-            model = "smart_rule_based"
-            
+        
+            # Show actual model being used
+            if hasattr(self.rag_pipeline.llm_integration, 'model_name'):
+                model = self.rag_pipeline.llm_integration.model_name
+            else:
+                model = "ollama-llama3.2:1b"
+        
             health_info = {
                 "status": status,
                 "model": model,
                 "documents_loaded": docs_loaded,
                 "vector_store_initialized": self.rag_pipeline.embedding_manager.index is not None,
-                "processed_files_count": len(self.processed_file_hashes)
             }
-            
+        
             if self.initialization_error:
                 health_info["initialization_error"] = self.initialization_error
                 health_info["status"] = "error"
-            
+        
             return health_info
-            
+        
         except Exception as e:
             logger.error(f"Error getting health info: {str(e)}")
             return {
@@ -304,11 +343,6 @@ class RAGService:
         except Exception as e:
             logger.error(f"Error listing documents: {str(e)}")
             return []
-    
-    def clear_processed_files(self):
-        """Clear the processed files cache (useful for testing)."""
-        self.processed_file_hashes.clear()
-        logger.info("Cleared processed files cache")
 
 # Global service instance
 rag_service = RAGService()

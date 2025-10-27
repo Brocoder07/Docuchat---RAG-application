@@ -14,14 +14,18 @@ VECTOR_STORE_PATH = os.path.join(DATA_DIR, "vector_store")
 @dataclass
 class ChunkingConfig:
     """Configuration for text chunking."""
-    chunk_size: int = 512  # characters per chunk
-    chunk_overlap: int = 50  # overlap between chunks
+    chunk_size: int = 800  # characters per chunk
+    chunk_overlap: int = 100  # overlap between chunks
 
 @dataclass
 class EmbeddingConfig:
     """Configuration for embeddings."""
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
-    device: str = "cpu"  # Use "cuda" if you have a GPU
+    # Use a faster model - better performance/speed balance
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"  # Back to faster model
+    # model_name: str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"  # Alternative for Q&A
+    device: str = "cpu"
+    # Add batch size optimization
+    batch_size: int = 32  # Process in smaller batches
 
 @dataclass
 class Config:
@@ -46,7 +50,7 @@ class Config:
         if self.embedding is None:
             self.embedding = EmbeddingConfig()
         if self.supported_extensions is None:
-            self.supported_extensions = ['.pdf', '.txt', '.docx', '.md']
+            self.supported_extensions = ['.pdf', '.txt', '.docx', '.md', '.xlsx']
         
         # Create necessary directories
         os.makedirs(self.raw_docs_dir, exist_ok=True)

@@ -1,7 +1,0 @@
-
-        Artificial Intelligence (AI) refers to the simulation of human intelligence in machines.
-        Machine Learning is a subset of AI that enables computers to learn without explicit programming.
-        Deep Learning uses neural networks with multiple layers to analyze various factors of data.
-        Natural Language Processing (NLP) allows computers to understand and interpret human language.
-        Computer Vision enables machines to interpret and understand the visual world.
-        

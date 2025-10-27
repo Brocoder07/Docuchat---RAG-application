@@ -1,11 +1,12 @@
 """
 Main RAG pipeline that combines document processing, embeddings, and retrieval.
 """
+import os
 import logging
 from typing import List, Tuple, Optional
 from src.document_processor import DocumentProcessor
 from src.embedding_manager import EmbeddingManager
-from src.llm_integration import LLMIntegration  # NEW
+from src.llm_integration import LLMIntegration
 from src.config import config
 
 logger = logging.getLogger(__name__)
@@ -16,14 +17,14 @@ class RAGPipeline:
     def __init__(self):
         self.document_processor = DocumentProcessor()
         self.embedding_manager = EmbeddingManager()
-        self.llm_integration = LLMIntegration()  # NEW
+        self.llm_integration = LLMIntegration()
         self.is_initialized = False
     
     def initialize(self):
         """Initialize the pipeline components."""
         try:
             self.embedding_manager.initialize_model()
-            self.llm_integration.initialize(use_openai=False)  # Use local model for now
+            self.llm_integration.initialize(use_openai=False)
             self.is_initialized = True
             logger.info("RAG pipeline initialized successfully")
         except Exception as e:
@@ -34,19 +35,16 @@ class RAGPipeline:
         """Process a document and add to the vector store."""
         if not self.is_initialized:
             self.initialize()
-    
+
         try:
-            # Check if document is already processed
-            if hasattr(self.embedding_manager, 'metadata'):
-                existing_sources = [meta.get("source") for meta in self.embedding_manager.metadata]
-                if file_path in existing_sources:
-                    logger.info(f"Document {file_path} already processed, skipping")
-                    return True
-        
             # Load and chunk document
             text = self.document_processor.load_document(file_path)
             if not text:
-                logger.error(f"Failed to load document: {file_path}")
+                logger.error(f"Failed to load document or no text extracted: {file_path}")
+                return False
+        
+            if len(text.strip()) < 10:  # Minimum text length
+                logger.error(f"Document contains too little text: {file_path}")
                 return False
         
             chunks = self.document_processor.chunk_text(text)
@@ -54,18 +52,23 @@ class RAGPipeline:
                 logger.error("No chunks created from document")
                 return False
         
+            logger.info(f"Created {len(chunks)} chunks from {file_path}")
+        
             # Create embeddings and add to index
             embeddings = self.embedding_manager.create_embeddings(chunks)
         
             # Create metadata for each chunk
-            metadata = [{"source": file_path, "chunk_id": i} for i in range(len(chunks))]
+            metadata = [{"source": file_path, "chunk_id": i, "filename": os.path.basename(file_path)} 
+                    for i in range(len(chunks))]
         
             if self.embedding_manager.index is None:
                 # Create new index
                 self.embedding_manager.create_index(embeddings, chunks, metadata)
+                logger.info(f"Created new vector index with {len(chunks)} chunks")
             else:
-                # Add to existing index efficiently
+                # Add to existing index
                 self._add_to_existing_index(embeddings, chunks, metadata)
+                logger.info(f"Added {len(chunks)} chunks to existing vector index")
         
             logger.info(f"Successfully processed document: {file_path}")
             return True
@@ -84,7 +87,7 @@ class RAGPipeline:
         all_chunks = existing_chunks + new_chunks
         all_metadata = existing_metadata + new_metadata
     
-        # Create embeddings for combined data (this is the bottleneck)
+        # Create embeddings for combined data
         logger.info(f"Adding {len(new_chunks)} new chunks to existing {len(existing_chunks)} chunks")
         all_embeddings = self.embedding_manager.create_embeddings(all_chunks)
     
@@ -115,7 +118,7 @@ class RAGPipeline:
             if not relevant_chunks:
                 return "No relevant information found in the documents.", []
             
-            # NEW: Use LLM to generate intelligent answer
+            # Use LLM to generate intelligent answer
             answer = self.llm_integration.generate_answer(question, relevant_chunks)
             
             return answer, relevant_chunks

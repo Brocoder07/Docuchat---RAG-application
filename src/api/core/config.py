@@ -20,7 +20,7 @@ class APIConfig:
     
     # File upload settings
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
-    ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.md']
+    ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.md', '.xlsx']
     UPLOAD_DIR = "data/raw_documents"
     
     # Create upload directory if it doesn't exist

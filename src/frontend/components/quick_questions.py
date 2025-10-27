@@ -14,6 +14,6 @@ def render_quick_questions():
             st.session_state.pending_question = question
             st.rerun()
 
-def get_pending_question() -> str:
+def get_pending_question():
     """Get and clear any pending quick question."""
     return st.session_state.pop('pending_question', None)

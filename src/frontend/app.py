@@ -1,6 +1,13 @@
 """
-Main Streamlit application - now clean and modular!
+Main Streamlit application - Fixed imports
 """
+import sys
+import os
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, project_root)
+
 import streamlit as st
 
 from src.frontend.config.settings import config
@@ -22,10 +29,6 @@ def main():
     # Initialize session state
     init_session_state()
     
-    # Initialize uploaded files tracking if not exists
-    if 'uploaded_files' not in st.session_state:
-        st.session_state.uploaded_files = {}
-    
     # Check API health
     api_healthy = api_client.check_health()
     set_api_health_status(api_healthy)
@@ -38,26 +41,14 @@ def main():
         _render_api_error()
         return
     
-    # Render sidebar (document upload, system info)
+    # Render main interface - sidebar first, then chat area
     render_sidebar()
-    
-    # Render main chat area
-    render_chat_area()
-    
-    # Handle pending quick questions
-    _handle_pending_questions()
-
-def _handle_pending_questions():
-    """Handle quick questions that were clicked."""
-    if 'pending_question' in st.session_state:
-        question = st.session_state.pending_question
-        # This will trigger the chat input in the next render
-        st.session_state.auto_question = question
+    render_chat_area()  # This now handles quick questions in sidebar
 
 def _render_header():
     """Render the page header."""
-    st.title("📚 DocuChat - FREE Document Q&A")
-    st.markdown("**Ask questions about your documents - Zero costs, 100% private!**")
+    st.title("📚 DocuChat - AI Document Q&A")
+    st.markdown("**Ask questions about your documents - Powered by Ollama LLM**")
     st.divider()
 
 def _render_api_error():
@@ -65,7 +56,7 @@ def _render_api_error():
     st.error("🚨 Backend API is not running!")
     
     st.info("**To start the backend API:**")
-    st.code("python -m src.api.main")
+    st.code("python -m src.api")
     
     st.info("**The API will be available at:**")
     st.code("http://localhost:8000")
