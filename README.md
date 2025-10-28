@@ -61,7 +61,7 @@
 ### 1. Clone the Repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Brocoder07/Docuchat---RAG-application.git
 cd docuchat
 ```
 
@@ -348,3 +348,4 @@ For issues and questions:
 ---
 
 **Built with ❤️ for the AI/ML community**
+
