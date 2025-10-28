@@ -1,5 +1,5 @@
 """
-Sidebar component for document management and system info.
+Enhanced sidebar component with better document tracking.
 """
 import streamlit as st
 from src.frontend.services.api_client import api_client
@@ -13,6 +13,8 @@ def render_sidebar():
         render_file_upload()
         st.divider()
         render_system_info()
+        st.divider()
+        render_document_list()
 
 def render_file_upload():
     """Render the file upload section."""
@@ -30,13 +32,13 @@ def render_file_upload():
             )
             
             if result["success"]:
-                st.success(result["data"]["message"])
+                st.success(f"✅ {result['data']['message']}")
                 # Update documents count
                 health_info = api_client.get_health_info()
                 if health_info:
                     update_documents_count(health_info["documents_loaded"])
             else:
-                st.error(result["error"])
+                st.error(f"❌ {result['error']}")
 
 def render_system_info():
     """Render system information section."""
@@ -49,9 +51,12 @@ def render_system_info():
         with col1:
             st.metric("Documents Loaded", health_info["documents_loaded"])
         with col2:
-            # Show actual model name instead of "Rule-Based"
             model_name = health_info.get("model", "ollama-llama3.2:1b")
             st.metric("AI Model", f"{model_name} ✓")
+        
+        # Show collection info if available
+        if health_info.get("collection_name"):
+            st.caption(f"Collection: {health_info['collection_name']}")
         
         st.metric("Cost", "$0.00")
         status = health_info.get("status", "unknown")
@@ -63,9 +68,35 @@ def render_system_info():
             st.metric("Status", "🟡 Unknown")
     else:
         st.warning("Unable to fetch system information")
+
+def render_document_list():
+    """Render the list of processed documents."""
+    st.header("📄 Processed Documents")
+    
+    # Add a refresh button
+    if st.button("🔄 Refresh Document List", use_container_width=True):
+        st.rerun()
+    
+    # Get document list from API
+    result = api_client.list_documents()
+    
+    if result["success"] and result["data"]["documents"]:
+        documents = result["data"]["documents"]
+        for doc in documents:
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**{doc['filename']}**")
+                    st.caption(f"Chunks: {doc['chunks']}")
+                with col2:
+                    st.caption(f"ID: {doc['document_id'][:8]}...")
+        st.caption(f"Total: {len(documents)} documents")
+    else:
+        st.info("No documents processed yet. Upload a document to get started!")
     
     # Clear chat history button
     st.divider()
     if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.chat_history = []
+        st.success("Chat history cleared!")
         st.rerun()

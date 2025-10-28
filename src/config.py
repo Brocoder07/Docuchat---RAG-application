@@ -20,12 +20,15 @@ class ChunkingConfig:
 @dataclass
 class EmbeddingConfig:
     """Configuration for embeddings."""
-    # Use a faster model - better performance/speed balance
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"  # Back to faster model
-    # model_name: str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"  # Alternative for Q&A
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     device: str = "cpu"
-    # Add batch size optimization
-    batch_size: int = 32  # Process in smaller batches
+    batch_size: int = 32
+
+@dataclass
+class ChromaConfig:
+    """Configuration for ChromaDB."""
+    collection_name: str = "docuchat_documents"
+    persist_directory: str = VECTOR_STORE_PATH
 
 @dataclass
 class Config:
@@ -39,6 +42,7 @@ class Config:
     # Processing configs
     chunking: ChunkingConfig = None
     embedding: EmbeddingConfig = None
+    chroma: ChromaConfig = None
     
     # Supported file types
     supported_extensions: List[str] = None
@@ -49,6 +53,8 @@ class Config:
             self.chunking = ChunkingConfig()
         if self.embedding is None:
             self.embedding = EmbeddingConfig()
+        if self.chroma is None:
+            self.chroma = ChromaConfig()
         if self.supported_extensions is None:
             self.supported_extensions = ['.pdf', '.txt', '.docx', '.md', '.xlsx']
         

@@ -1,182 +1,119 @@
 """
-Handles text embedding and vector storage using FAISS.
+Updated embedding manager using ChromaDB.
 """
 import os
 import logging
-import numpy as np
-from typing import List, Tuple
-from sentence_transformers import SentenceTransformer
-import faiss
+from typing import List, Tuple, Optional, Dict
 
+from src.chroma_manager import ChromaManager
 from src.config import config
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingManager:
-    """Manages text embeddings and FAISS vector store."""
+    """Manages text embeddings and ChromaDB vector store."""
     
     def __init__(self):
+        self.chroma_manager = ChromaManager()
         self.embedding_model = None
-        self.index = None
-        self.chunks = []  # Store original text chunks
-        self.metadata = []  # Store metadata for each chunk
         
     def initialize_model(self):
-        """Initialize the embedding model."""
+        """Initialize the embedding model and ChromaDB."""
         try:
-            logger.info(f"Loading embedding model: {config.embedding.model_name}")
-            self.embedding_model = SentenceTransformer(config.embedding.model_name)
-            logger.info("Embedding model loaded successfully")
+            self.chroma_manager.initialize()
+            logger.info("Embedding manager initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to load embedding model: {str(e)}")
+            logger.error(f"Failed to initialize embedding manager: {str(e)}")
             raise
     
-    def create_embeddings(self, chunks: List[str]) -> np.ndarray:
+    def create_embeddings(self, chunks: List[str]) -> List:
         """
         Create embeddings for text chunks.
-        
-        Args:
-            chunks: List of text chunks to embed
-            
-        Returns:
-            numpy array of embeddings
+        Note: ChromaDB handles embedding internally, but we keep this for compatibility.
         """
-        if self.embedding_model is None:
-            self.initialize_model()
-        
-        logger.info(f"Creating embeddings for {len(chunks)} chunks")
-        embeddings = self.embedding_model.encode(chunks, show_progress_bar=True)
-        logger.info(f"Created embeddings with shape: {embeddings.shape}")
-        
-        return embeddings
+        return chunks
     
-    def create_index(self, embeddings: np.ndarray, chunks: List[str], metadata: List[dict] = None):
+    def create_index(self, embeddings: List, chunks: List[str], metadata: List[Dict] = None):
         """
-        Create FAISS index from embeddings.
-        
-        Args:
-            embeddings: numpy array of embeddings
-            chunks: Original text chunks
-            metadata: Optional metadata for each chunk
+        Create index in ChromaDB.
+        For compatibility with existing code.
         """
         if metadata is None:
             metadata = [{} for _ in range(len(chunks))]
         
-        # Create FAISS index
-        dimension = embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(dimension)  # Inner product (cosine similarity)
+        # Generate a document ID
+        import uuid
+        document_id = str(uuid.uuid4())[:8]
         
-        # Normalize embeddings for cosine similarity
-        faiss.normalize_L2(embeddings)
-        self.index.add(embeddings)
-        
-        # Store chunks and metadata
-        self.chunks = chunks
-        self.metadata = metadata
-        
-        logger.info(f"Created FAISS index with {self.index.ntotal} vectors")
+        self.chroma_manager.add_documents(chunks, metadata, document_id)
     
-    def save_index(self, file_path: str = None):
-        """Save the FAISS index and associated data to disk."""
-        if file_path is None:
-            file_path = os.path.join(config.vector_store_path, "faiss_index")
-        
-        if self.index is None:
-            logger.warning("No index to save")
-            return
-        
-        # Save FAISS index
-        faiss.write_index(self.index, file_path + ".index")
-        
-        # Save chunks and metadata (simplified - in production use proper serialization)
-        import pickle
-        with open(file_path + "_data.pkl", 'wb') as f:
-            pickle.dump({'chunks': self.chunks, 'metadata': self.metadata}, f)
-        
-        logger.info(f"Saved index to {file_path}.index")
-    
-    def load_index(self, file_path: str = None):
-        """Load FAISS index and associated data from disk."""
-        if file_path is None:
-            file_path = os.path.join(config.vector_store_path, "faiss_index")
-        
-        try:
-            # Load FAISS index
-            self.index = faiss.read_index(file_path + ".index")
-            
-            # Load chunks and metadata
-            import pickle
-            with open(file_path + "_data.pkl", 'rb') as f:
-                data = pickle.load(f)
-                self.chunks = data['chunks']
-                self.metadata = data['metadata']
-            
-            logger.info(f"Loaded index with {self.index.ntotal} vectors")
-        except Exception as e:
-            logger.error(f"Failed to load index: {str(e)}")
-            raise
-    
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[str, float, dict]]:
+    def add_to_index(self, chunks: List[str], metadata: List[Dict], document_id: str):
         """
-        Search for similar chunks to the query.
+        Add documents to ChromaDB index.
         
         Args:
-            query: Search query text
-            top_k: Number of top results to return
+            chunks: List of text chunks
+            metadata: Metadata for each chunk
+            document_id: Unique document identifier
+        """
+        self.chroma_manager.add_documents(chunks, metadata, document_id)
+    
+    def search(self, query: str, top_k: int = 5, filter_metadata: Optional[Dict] = None) -> List[Tuple[str, float, Dict]]:
+        """
+        Search for similar chunks.
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            filter_metadata: Optional metadata filters
             
         Returns:
             List of (chunk_text, similarity_score, metadata) tuples
         """
-        if self.index is None or self.embedding_model is None:
-            raise ValueError("Index or embedding model not initialized")
-        
-        # Create embedding for query
-        query_embedding = self.embedding_model.encode([query])
-        faiss.normalize_L2(query_embedding)
-        
-        # Search
-        scores, indices = self.index.search(query_embedding, top_k)
-        
-        # Prepare results
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < len(self.chunks):  # Valid index
-                results.append((
-                    self.chunks[idx],
-                    float(score),
-                    self.metadata[idx] if idx < len(self.metadata) else {}
-                ))
-        
-        return results
+        return self.chroma_manager.search(query, top_k, filter_metadata)
+    
+    def get_stats(self) -> Dict:
+        """Get vector store statistics."""
+        return self.chroma_manager.get_collection_stats()
+    
+    def list_documents(self) -> List[Dict]:
+        """List all documents in the vector store."""
+        return self.chroma_manager.list_documents()
+    
+    def delete_document(self, document_id: str):
+        """Delete a document from the vector store."""
+        self.chroma_manager.delete_document(document_id)
+    
+    # For backward compatibility
+    @property
+    def index(self):
+        """For backward compatibility with existing code."""
+        return self.chroma_manager.collection is not None
+    
+    @property 
+    def chunks(self):
+        """For backward compatibility - not used with ChromaDB."""
+        return []
+    
+    @property
+    def metadata(self):
+        """For backward compatibility - not used with ChromaDB."""
+        return []
 
 def main():
-    """Test the embedding manager with a simple example."""
-    import tempfile
+    """Test the updated embedding manager."""
+    print("🧪 Testing Updated Embedding Manager...")
     
-    # Create test chunks
-    test_chunks = [
-        "Machine learning is a subset of artificial intelligence.",
-        "Deep learning uses neural networks with multiple layers.",
-        "Natural language processing helps computers understand human language.",
-        "Vector databases store embeddings for similarity search.",
-        "RAG systems combine retrieval and generation for better answers."
-    ]
-    
-    # Initialize and test
     manager = EmbeddingManager()
-    embeddings = manager.create_embeddings(test_chunks)
-    manager.create_index(embeddings, test_chunks)
+    manager.initialize_model()
     
     # Test search
-    query = "What is neural networks?"
-    results = manager.search(query, top_k=2)
+    results = manager.search("cloud computing", top_k=2)
+    print(f"Found {len(results)} results")
     
-    print(f"Query: '{query}'")
-    print("Top results:")
-    for i, (chunk, score, metadata) in enumerate(results):
-        print(f"{i+1}. Score: {score:.4f}")
-        print(f"   Text: {chunk}")
-        print()
+    # Test stats
+    stats = manager.get_stats()
+    print(f"Vector store stats: {stats}")
 
 if __name__ == "__main__":
     main()

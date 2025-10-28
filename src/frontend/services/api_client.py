@@ -10,7 +10,7 @@ class APIClient:
     
     def __init__(self):
         self.base_url = config.API_BASE_URL
-        self.timeout = 60  # Increased timeout to 60 seconds
+        self.timeout = 60
     
     def check_health(self) -> bool:
         """Check if the API is healthy."""
@@ -23,7 +23,6 @@ class APIClient:
     def get_health_info(self) -> Optional[Dict[str, Any]]:
         """Get detailed health information."""
         try:
-            # Use the direct health endpoint without redirects
             response = requests.get(f"{self.base_url}/health/", timeout=5)
             if response.status_code == 200:
                 return response.json()
@@ -34,13 +33,6 @@ class APIClient:
     def upload_document(self, file_data, filename: str) -> Dict[str, Any]:
         """
         Upload a document to the API.
-        
-        Args:
-            file_data: File data to upload
-            filename: Name of the file
-            
-        Returns:
-            API response
         """
         try:
             files = {"file": (filename, file_data)}
@@ -62,20 +54,13 @@ class APIClient:
     
     def query_documents(self, question: str, top_k: int = 3) -> Dict[str, Any]:
         """
-        Send a query to the API.
-        
-        Args:
-            question: The question to ask
-            top_k: Number of relevant chunks to retrieve
-            
-        Returns:
-            API response
+        Send a query to the API with enhanced source information.
         """
         try:
             response = requests.post(
                 f"{self.base_url}/chat/query",
                 json={"question": question, "top_k": top_k},
-                timeout=self.timeout  # Use the increased timeout
+                timeout=self.timeout
             )
             
             if response.status_code == 200:

@@ -1,5 +1,5 @@
 """
-Session state management utilities.
+Enhanced session state management with source information.
 """
 import streamlit as st
 
@@ -24,9 +24,9 @@ def clear_chat_history():
     """Clear chat history from session state."""
     st.session_state.chat_history = []
 
-def add_to_chat_history(question: str, answer: str, confidence: str = None):
-    """Add a message to chat history."""
-    st.session_state.chat_history.append((question, answer, confidence))
+def add_to_chat_history(question: str, answer: str, confidence: str = None, source_info: dict = None):
+    """Add a message to chat history with source information."""
+    st.session_state.chat_history.append((question, answer, confidence, source_info or {}))
 
 def get_chat_history():
     """Get the current chat history."""
