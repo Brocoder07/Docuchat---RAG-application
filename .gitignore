@@ -7,9 +7,12 @@ __pycache__/
 *.pyd
 
 # Data and models
-data/vector_store/
-*.pdf
-*.docx
+
+#data/vector_store/
+#.pdf
+#.docx
+
+
 
 # IDE
 .vscode/
