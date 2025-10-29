@@ -1,7 +1,8 @@
 """
-Enhanced document processing functionality with support for multiple file types.
+Enhanced document processing functionality with support for multiple file types - FIXED VERSION
 """
 import os
+import re
 import sys
 import logging
 from typing import List, Optional
@@ -69,22 +70,58 @@ class DocumentProcessor:
             return ""
     
     def _load_pdf_file(self, file_path: str) -> str:
-        """Load text from a PDF file."""
+        """Load text from a PDF file with enhanced parsing and cleaning."""
         try:
             from PyPDF2 import PdfReader
             reader = PdfReader(file_path)
             text = ""
-            for page in reader.pages:
+        
+            for page_num, page in enumerate(reader.pages):
                 page_text = page.extract_text()
                 if page_text:
-                    text += page_text + "\n"
+                    # Clean up the text - fix common PDF parsing issues
+                    page_text = self._clean_pdf_text(page_text)
+                    text += f"Page {page_num + 1}: {page_text}\n\n"
+        
+            if not text.strip():
+                logger.warning(f"PDF {file_path} appears to be empty or couldn't be parsed")
+                return ""
+            
+            logger.info(f"Extracted {len(text)} characters from PDF {file_path}")
             return text.strip()
+        
         except ImportError:
             logger.error("PyPDF2 not installed. Please install it with: pip install pypdf2")
             return ""
         except Exception as e:
             logger.error(f"Error reading PDF {file_path}: {str(e)}")
             return ""
+
+    def _clean_pdf_text(self, text: str) -> str:
+        """Clean common PDF parsing artifacts with better space handling."""
+        # Replace weird bullet characters with standard bullets
+        text = text.replace('', '•')
+        text = text.replace('\uf0b7', '•')
+    
+        # FIX CRITICAL: Fix missing spaces between words
+        # Add space between lowercase and uppercase letters (camelCase breaks)
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    
+        # Add space between words and punctuation that got merged
+        text = re.sub(r'([a-zA-Z])([.,!?;:])', r'\1 \2', text)
+        text = re.sub(r'([.,!?;:])([a-zA-Z])', r'\1 \2', text)
+    
+        # Fix specific common PDF merging issues
+        text = re.sub(r'(\w)(Firebase|Android|Kotlin|Java|Python|MongoDB|PostgreSQL|Spring|REST|API|UI|UX|MVVM|CRUD|JWT|OAuth)', r'\1 \2', text)
+    
+        # Fix hyphenated line breaks
+        text = re.sub(r'(\w+)-\s*\n\s*(\w+)', r'\1\2', text)
+    
+        # Normalize whitespace but preserve meaningful newlines
+        text = re.sub(r'[ \t]+', ' ', text)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+    
+        return text.strip()
     
     def _load_docx_file(self, file_path: str) -> str:
         """Load text from a DOCX file."""
@@ -149,49 +186,75 @@ class DocumentProcessor:
 
     def chunk_text(self, text: str, chunk_size: int = None, chunk_overlap: int = None) -> List[str]:
         """
-        Split text into overlapping chunks.
-        
-        Args:
-            text: Input text to chunk
-            chunk_size: Size of each chunk in characters
-            chunk_overlap: Overlap between chunks in characters
-            
-        Returns:
-            List of text chunks
+        Split text into overlapping chunks with project-aware boundaries.
         """
         if chunk_size is None:
             chunk_size = config.chunking.chunk_size
         if chunk_overlap is None:
             chunk_overlap = config.chunking.chunk_overlap
-        
-        if chunk_overlap >= chunk_size:
-            raise ValueError("Chunk overlap must be smaller than chunk size")
-        
+    
         # Handle empty text
         if not text or not text.strip():
             logger.warning("Empty text provided for chunking")
             return []
-        
+    
+        # First, try to split by project sections (look for project headers)
+        project_pattern = r'(?=\n\s*[A-Z][a-z]+ \| GitHub\s*\n)'
+        sections = re.split(project_pattern, text)
+    
         chunks = []
-        start = 0
-        text_length = len(text)
+    
+        for section in sections:
+            if not section.strip():
+                continue
+            
+            # If section is small enough, use it as one chunk
+            if len(section) <= chunk_size:
+                if section.strip():
+                    chunks.append(section.strip())
+                continue
         
-        while start < text_length:
-            end = start + chunk_size
-            chunk = text[start:end]
-            
-            # Only add non-empty chunks
-            if chunk.strip():
-                chunks.append(chunk)
-            
-            # Move start position for next chunk
-            start += chunk_size - chunk_overlap
-            
-            # If we're at the end, break
-            if start >= text_length:
-                break
+            # Otherwise, split the section by sentences or paragraphs
+            section_chunks = self._split_section(section, chunk_size, chunk_overlap)
+            chunks.extend(section_chunks)
+    
+        logger.info(f"Created {len(chunks)} chunks from text (length: {len(text)} chars)")
+    
+        # Log chunk statistics
+        if chunks:
+            avg_len = sum(len(chunk) for chunk in chunks) / len(chunks)
+            logger.info(f"Chunk stats: avg length={avg_len:.0f} chars, range={min(len(c) for c in chunks)}-{max(len(c) for c in chunks)} chars")
         
-        logger.info(f"Created {len(chunks)} chunks from text (length: {text_length} chars)")
+            # Log first few chunks for debugging
+            for i, chunk in enumerate(chunks[:3]):
+                logger.debug(f"Chunk {i+1} preview: {chunk[:100]}...")
+    
+        return chunks
+
+    def _split_section(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        """Split a section of text into chunks."""
+        chunks = []
+        sentences = re.split(r'[.!?]+', text)
+    
+        current_chunk = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # If adding this sentence would exceed chunk size, save current chunk
+            if current_chunk and len(current_chunk) + len(sentence) > chunk_size:
+                chunks.append(current_chunk.strip())
+                # Start new chunk with overlap
+                overlap_start = max(0, len(current_chunk) - chunk_overlap)
+                current_chunk = current_chunk[overlap_start:] + " " + sentence
+            else:
+                current_chunk += " " + sentence if current_chunk else sentence
+    
+        # Add the last chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+    
         return chunks
 
     def get_supported_extensions(self) -> List[str]:

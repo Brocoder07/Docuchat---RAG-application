@@ -4,7 +4,7 @@ Main FastAPI application.
 from fastapi import FastAPI
 import logging
 from fastapi.middleware.cors import CORSMiddleware
-
+from src.api.routes import debug
 from src.api.core.config import api_config
 from src.api.routes import health, documents, chat
 from src.api.services.rag_service import rag_service
@@ -31,6 +31,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(documents.router)
 app.include_router(chat.router)
+app.include_router(debug.router)
 
 # Root endpoint
 @app.get("/")

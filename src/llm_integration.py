@@ -65,29 +65,81 @@ class LLMIntegration:
     
     def generate_answer(self, question: str, context_chunks: List[Tuple[str, float, dict]]) -> str:
         """
-        Generate a comprehensive answer using Ollama LLM with context.
+        Generate a comprehensive answer using Ollama LLM with context and validation.
         """
         if not context_chunks:
             return "I cannot answer this question based on the provided documents."
-    
+
         # Use lower threshold to capture more relevant content
         relevant_chunks = [(chunk, score, meta) for chunk, score, meta in context_chunks if score > 0.2]
-    
+
         if not relevant_chunks:
             return "I cannot answer this question based on the provided documents."
-    
+
         # ALWAYS try LLM first for better quality answers
         if self.use_ollama:
             try:
                 ollama_answer = self._call_ollama_api(question, relevant_chunks)
                 if ollama_answer and ollama_answer.strip():
-                    logger.info("✅ Using LLM-generated answer")
-                    return ollama_answer
+                    # VALIDATE the answer is grounded in context
+                    if self._validate_answer_grounding(ollama_answer, relevant_chunks):
+                        logger.info("✅ Using validated LLM-generated answer")
+                        return ollama_answer
+                    else:
+                        logger.warning("❌ LLM answer failed validation - using fallback")
+                        # Fall through to rule-based
             except Exception as e:
                 logger.warning(f"Ollama API failed: {str(e)}, using fallback")
-    
-        # Fallback - use the improved fallback
+
+        # Fallback - use the improved rule-based that's more accurate
         return self._detailed_rule_based_fallback(question, relevant_chunks)
+    
+    def _validate_answer_grounding(self, answer: str, context_chunks: List[Tuple[str, float, dict]]) -> bool:
+        """Validate that the answer is properly grounded in the retrieved context."""
+        if not answer or not context_chunks:
+            return False
+    
+        # Check for hallucination indicators
+        hallucination_phrases = [
+            "based on my knowledge",
+            "I think",
+            "I believe",
+            "typically",
+            "usually",
+            "generally",
+            "in my experience",
+            "would likely",
+            "probably",
+            "might be"
+        ]
+    
+        answer_lower = answer.lower()
+        if any(phrase in answer_lower for phrase in hallucination_phrases):
+            return False
+    
+        # Extract key facts from answer and check if they appear in context
+        context_text = " ".join([chunk[0].lower() for chunk in context_chunks])
+    
+        # Simple fact validation - check if key terms from answer appear in context
+        answer_sentences = re.split(r'[.!?]+', answer)
+        grounded_sentences = 0
+    
+        for sentence in answer_sentences:
+            sentence = sentence.strip().lower()
+            if len(sentence) < 20:  # Skip very short sentences
+                continue
+            
+            # Check if this sentence is grounded in context
+            words = set(re.findall(r'\b\w+\b', sentence))
+            context_words = set(re.findall(r'\b\w+\b', context_text))
+        
+            # If majority of key words appear in context, consider it grounded
+            overlap = len(words.intersection(context_words))
+            if len(words) > 0 and overlap / len(words) > 0.3:
+                grounded_sentences += 1
+    
+        # Require at least 50% of sentences to be grounded
+        return grounded_sentences / len([s for s in answer_sentences if len(s.strip()) > 20]) > 0.5 if answer_sentences else False
     
     def _call_ollama_api(self, question: str, relevant_chunks: List[Tuple[str, float, dict]]) -> Optional[str]:
         """
@@ -322,23 +374,27 @@ class LLMIntegration:
         return min(score, 1.0)
     
     def _build_dynamic_prompt(self, question: str, context: str) -> str:
-        """Build dynamic prompt that forces complete, structured answers."""
-        strict_prompt = f"""You MUST answer the question using ONLY the information from the provided context. 
+        """Build STRICT prompt that prevents hallucination and forces context-only answers."""
+    
+        strict_prompt = f"""CRITICAL INSTRUCTIONS - READ CAREFULLY:
+    You MUST answer the question using ONLY the information from the provided context below.
+    You MUST NOT use any external knowledge, assumptions, or make up any information.
+    You MUST NOT combine information from different projects unless explicitly stated in the context.
+    If the context doesn't contain the answer, say "I cannot answer this based on the provided documents."
 
-CRITICAL RULES:
-1. Use ONLY the information provided in the context below
-2. Do not use any external knowledge or make up information
-3. If the context contains a list or categories, provide the COMPLETE list
-4. Structure your answer clearly with bullet points or numbered lists when appropriate
-5. Include ALL relevant details mentioned in the context
-6. If you cannot answer based on the context, say "I cannot answer this based on the provided documents."
+    CONTEXT:
+    {context}
 
-CONTEXT:
-{context}
+    QUESTION: {question}
 
-QUESTION: {question}
+    STRICT RULES FOR YOUR ANSWER:
+    1. Use ONLY the exact information from the context above
+    2. If the context mentions multiple projects, keep them separate and distinct
+    3. Do NOT attribute features of one project to another project
+    4. If you're unsure, say "The context doesn't provide enough information about this"
+    5. Be precise and factual - do not extrapolate or assume
 
-ANSWER BASED STRICTLY ON THE CONTEXT:"""
+    ANSWER BASED STRICTLY ON THE CONTEXT:"""
 
         return strict_prompt
     

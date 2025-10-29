@@ -94,7 +94,7 @@ class RAGService:
         try:
             existing_documents = self.rag_pipeline.get_document_list()
             for existing_doc in existing_documents:
-                if existing_doc.filename == file.filename:
+                if existing_doc.get('filename') == file.filename:
                     logger.warning(f"Duplicate filename detected: {file.filename}")
                     raise HTTPException(
                         status_code=400,
