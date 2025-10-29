@@ -1,36 +1,27 @@
 # src/rag_pipeline.py
 """
 Robust RAG pipeline with defensive document ingestion.
-
-Behavior:
-- Tries to use src.document_processor if available.
-- If that fails (module absent, incompatible API, or no chunks returned),
-  falls back to extracting text from PDF using pdfplumber / PyPDF2 / fitz (PyMuPDF).
-- Splits text into chunks with overlap (configurable).
-- Ingests chunks into Chroma via ChromaManager.add_documents.
-- Exposes: process_document(), get_document_list(), get_stats(), query()
 """
 
 import logging
 import os
 import traceback
+from src.chroma_manager import ChromaManager
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Try to import local helpers; keep tolerant so module import never crashes.
-try:
-    from src.chroma_manager import ChromaManager
-except Exception:
-    ChromaManager = None
-    logger.debug("Could not import ChromaManager from src.chroma_manager.")
+# --------------------------------------------------------------------
+# Safe imports for helpers
+# --------------------------------------------------------------------
+
 
 try:
     from src.llm_integration import LLMIntegration
-except Exception:
+except Exception as e:
     LLMIntegration = None
-    logger.debug("Could not import LLMIntegration from src.llm_integration.")
+    logger.warning(f"Could not import LLMIntegration ({e})")
 
 
 class RAGPipeline:
@@ -39,29 +30,23 @@ class RAGPipeline:
 Context:
 {context_block}
 
-INSTRUCTIONS:
-1. Using only the text in Context above, answer the Question below.
-2. If an item requested is not present in Context, explicitly write "Not mentioned."
-3. When listing items, cite the CHUNK number for each item.
-4. Keep answers concise and factual.
-
 Question: {question}
 Answer:
 """
 
-    def __init__(self, chroma_manager: Optional[Any] = None, llm_integration: Optional[Any] = None,
-                 retrieval_top_k: int = 5, chunk_size: int = 800, chunk_overlap: int = 150):
-        """
-        Construct RAGPipeline.
-
-        If chroma_manager or llm_integration are None, attempts to auto-create the defaults.
-        chunk_size/chunk_overlap control fallback chunking.
-        """
+    def __init__(
+        self,
+        chroma_manager: Optional[Any] = None,
+        llm_integration: Optional[Any] = None,
+        retrieval_top_k: int = 5,
+        chunk_size: int = 800,
+        chunk_overlap: int = 150,
+    ):
         self.retrieval_top_k = retrieval_top_k
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-        # chroma manager
+        # ---- Chroma manager ----
         if chroma_manager is not None:
             self.chroma_manager = chroma_manager
             logger.info("RAGPipeline: using provided ChromaManager")
@@ -70,14 +55,14 @@ Answer:
                 try:
                     self.chroma_manager = ChromaManager()
                     logger.info("RAGPipeline: auto-created ChromaManager")
-                except Exception:
-                    logger.exception("RAGPipeline: failed to auto-create ChromaManager")
+                except Exception as e:
+                    logger.exception("RAGPipeline: failed to auto-create ChromaManager: %s", e)
                     self.chroma_manager = None
             else:
                 self.chroma_manager = None
                 logger.warning("RAGPipeline: ChromaManager not available")
 
-        # llm integration
+        # ---- LLM integration ----
         if llm_integration is not None:
             self.llm_integration = llm_integration
             logger.info("RAGPipeline: using provided LLMIntegration")
@@ -86,16 +71,18 @@ Answer:
                 try:
                     self.llm_integration = LLMIntegration()
                     logger.info("RAGPipeline: auto-created LLMIntegration")
-                except Exception:
-                    logger.exception("RAGPipeline: failed to auto-create LLMIntegration")
+                except Exception as e:
+                    logger.exception("RAGPipeline: failed to auto-create LLMIntegration: %s", e)
                     self.llm_integration = None
             else:
                 self.llm_integration = None
                 logger.warning("RAGPipeline: LLMIntegration not available")
 
-        # Bookkeeping for UI and dedupe
         self.processed_documents: List[Dict[str, Any]] = []
 
+    # ----------------------------------------------------------------
+    # Initialization
+    # ----------------------------------------------------------------
     def initialize(self):
         try:
             if self.llm_integration and not getattr(self.llm_integration, "initialized", False):

@@ -1,9 +1,10 @@
 # src/chroma_manager.py
 import logging
 from typing import List, Optional, Tuple, Dict, Any
-
+from src.embeddings_factory import get_embedder
 logger = logging.getLogger(__name__)
 
+embed = get_embedder()
 
 class ChromaManager:
     """
@@ -138,41 +139,41 @@ class ChromaManager:
 
         return parsed
 
-    def get_all_chunks(self) -> List[Tuple[str, Dict]]:
+    def get_all_chunks(self):
         """
-        Retrieve all stored chunks (text + metadata) from the collection.
-        Implementation depends on client; attempt a few common methods.
-        Returns list of (text, metadata).
+        Safer retrieval using explicit local embeddings for queries, avoiding chroma's ONNX auto-download.
         """
-        if not self.collection:
-            logger.warning("ChromaManager.get_all_chunks called but no collection initialized; returning empty list.")
-            return []
-
         try:
-            # Try a direct collection.get_all() if available
-            if hasattr(self.collection, "get_all"):
-                all_items = self.collection.get_all()
-                texts = all_items.get("documents") or []
-                metas = all_items.get("metadatas") or []
-                parsed = []
-                for i, t in enumerate(texts):
-                    meta = metas[i] if i < len(metas) else {}
-                    parsed.append((t, meta))
-                return parsed
-        except Exception:
-            logger.debug("collection.get_all() not available or failed; falling back to query scan.")
-
-        # Fallback: attempt to query for an empty string to retrieve top documents
-        try:
-            results = self.collection.query(query_texts=[""], n_results=1000)
-            res0 = results.get("results", [results])[0]
-            docs = res0.get("documents", [])
-            metas = res0.get("metadatas", [])
-            parsed = []
-            for i, t in enumerate(docs):
-                meta = metas[i] if i < len(metas) else {}
-                parsed.append((t, meta))
-            return parsed
-        except Exception:
-            logger.exception("Failed to retrieve all chunks from Chroma collection.")
-            return []
+            # simple empty query text -> we can instead request all docs, but to use similarity we need embeddings
+            # Use a dummy empty string embedding if you want top-k for empty query.
+            query_texts = [""]
+            # compute embeddings locally
+            query_embeddings = embed(query_texts)  # list of lists
+            results = self.collection.query(query_embeddings=query_embeddings, n_results=1000)
+            # parse results into docs list as before
+            docs = []
+            docs_list = results.get("documents", [[]])[0]
+            metadatas = results.get("metadatas", [[]])[0] if results.get("metadatas") else [None]*len(docs_list)
+            ids = results.get("ids", [[]])[0] if results.get("ids") else [None]*len(docs_list)
+            for i, text in enumerate(docs_list):
+                docs.append({"id": ids[i] if i < len(ids) else None,
+                            "document": text,
+                            "metadata": metadatas[i] if i < len(metadatas) else None})
+            return docs
+        except Exception as e:
+            logger.exception("Query with local embeddings failed: %s", e)
+            # fallback to collection.get()
+            try:
+                fallback = self.collection.get()
+                docs = []
+                docs_list = fallback.get("documents", [])
+                metadatas = fallback.get("metadatas", [])
+                ids = fallback.get("ids", [])
+                for i, text in enumerate(docs_list):
+                    docs.append({"id": ids[i] if i < len(ids) else None,
+                                "document": text,
+                                "metadata": metadatas[i] if i < len(metadatas) else None})
+                return docs
+            except Exception as e2:
+                logger.exception("Fallback collection.get() also failed: %s", e2)
+                return []
