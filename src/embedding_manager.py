@@ -102,7 +102,7 @@ class EmbeddingManager:
 
 def main():
     """Test the updated embedding manager."""
-    print("🧪 Testing Updated Embedding Manager...")
+    print("Testing Updated Embedding Manager...")
     
     manager = EmbeddingManager()
     manager.initialize_model()

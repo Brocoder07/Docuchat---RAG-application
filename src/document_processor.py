@@ -265,21 +265,21 @@ def main():
     """Test the document processor with various file types."""
     processor = DocumentProcessor()
     
-    print("🧪 Testing Document Processor with Multiple File Types")
+    print("Testing Document Processor with Multiple File Types")
     print(f"Supported extensions: {processor.get_supported_extensions()}")
     
     # Ensure test directory exists
     test_dir = "data/raw_documents"
     os.makedirs(test_dir, exist_ok=True)
     
-    print("✅ Document processor is ready with support for:")
+    print("Document processor is ready with support for:")
     print("   - .txt (Text files)")
     print("   - .pdf (PDF documents)")
     print("   - .docx (Word documents)")
     print("   - .md (Markdown files)")
     print("   - .xlsx (Excel spreadsheets)")
     
-    print("\n🎉 Document processor test completed!")
+    print("\nDocument processor test completed!")
 
 if __name__ == "__main__":
     main()
