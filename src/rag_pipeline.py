@@ -1,6 +1,6 @@
 # src/rag_pipeline.py
 """
-Robust RAG pipeline with defensive document ingestion.
+Production-ready RAG pipeline with universal hallucination prevention.
 """
 
 import logging
@@ -16,23 +16,53 @@ logger = logging.getLogger(__name__)
 # Safe imports for helpers
 # --------------------------------------------------------------------
 
-
 try:
     from src.llm_integration import LLMIntegration
 except Exception as e:
     LLMIntegration = None
     logger.warning(f"Could not import LLMIntegration ({e})")
 
+try:
+    from src.context.universal_context_verifier import UniversalContextVerifier
+except Exception as e:
+    UniversalContextVerifier = None
+    logger.warning(f"Could not import UniversalContextVerifier ({e})")
+
 
 class RAGPipeline:
-    PROMPT_TEMPLATE = """You are a helpful assistant that must answer using ONLY the information in the provided Context.
+    PROMPT_TEMPLATE = """CRITICAL INSTRUCTIONS - READ CAREFULLY:
+You are an assistant that answers using ONLY the information present in the provided Context.
+You MUST follow these rules exactly:
 
-Context:
+CONTEXT RULES:
+1. Use ONLY the information from the Context below. Do not use any prior knowledge.
+2. If information is missing from Context, say 'The context does not provide information about X'
+3. Do not add, infer, or assume any information not explicitly stated
+4. Do not make comparisons, draw conclusions, or provide analysis beyond what's directly stated
+5. If you cannot answer based on Context, say so explicitly
+
+CITATION RULES:
+6. ALWAYS reference which chunks contain the information (e.g., 'Based on Chunk 1 and Chunk 3')
+7. When listing items, cite the specific chunk for each item
+8. If information appears in multiple chunks, mention all relevant chunks
+
+LANGUAGE RULES:
+9. Avoid speculative language (probably, might be, could be, I think, I believe)
+10. Avoid absolute statements (always, never, all, every) unless explicitly stated
+11. Avoid vague quantifiers (many, several, some) - be specific about what's in Context
+12. Do not reference external knowledge, studies, or common practices
+
+SAFETY RULES:
+13. If Context contains conflicting information, acknowledge the conflict
+14. If you're unsure, err on the side of caution and admit limitations
+15. Format your answer clearly but do not invent structure not in Context
+
+CONTEXT:
 {context_block}
 
-Question: {question}
-Answer:
-"""
+QUESTION: {question}
+
+YOUR ANSWER (following all rules above):"""
 
     def __init__(
         self,
@@ -78,6 +108,14 @@ Answer:
                 self.llm_integration = None
                 logger.warning("RAGPipeline: LLMIntegration not available")
 
+        # ---- Context Verifier ----
+        if UniversalContextVerifier is not None:
+            self.context_verifier = UniversalContextVerifier()
+            logger.info("RAGPipeline: initialized UniversalContextVerifier")
+        else:
+            self.context_verifier = None
+            logger.warning("RAGPipeline: UniversalContextVerifier not available")
+
         self.processed_documents: List[Dict[str, Any]] = []
 
     # ----------------------------------------------------------------
@@ -90,7 +128,7 @@ Answer:
                     self.llm_integration.initialize()
                 except Exception:
                     logger.exception("LLMIntegration.initialize() failed")
-            logger.info("RAG pipeline initialized successfully")
+            logger.info("RAG pipeline initialized successfully with hallucination prevention")
         except Exception:
             logger.exception("Failed to initialize RAG pipeline")
             raise
@@ -100,112 +138,82 @@ Answer:
     # -----------------------
     def process_document(self, file_path: str, filename: Optional[str] = None) -> Dict[str, Any]:
         """
-        Main ingestion entrypoint used by the API.
-
-        Steps:
-        1. Try to use src.document_processor.process_document(file_path) or DocumentProcessor class.
-        2. Normalize whatever is returned into list[{"id","text","metadata"}].
-        3. If step 1 fails or returns nothing, fallback to local PDF/text extraction + chunking.
-        4. Add chunks to Chroma using chroma_manager.add_documents
-        5. Save bookkeeping and return a dict describing the processed document.
-
-        Raises descriptive RuntimeError on failure (so caller can clean up upload files).
+        Document processing with progress tracking.
         """
-        logger.info("Processing document: %s", file_path)
+        logger.info("🚀 Starting document processing: %s", file_path)
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
+    
         title = filename or os.path.basename(file_path)
         doc_uuid = str(uuid.uuid4())
 
-        # 1) Try src.document_processor if present
-        chunks: List[Dict[str, Any]] = []
+        # Extract text
+        logger.info("📄 Step 1/3: Extracting text from document...")
         try:
-            import importlib
-            try:
-                dp = importlib.import_module("src.document_processor")
-                logger.debug("Imported src.document_processor successfully, attempting to use it.")
-            except Exception:
-                dp = None
-                logger.debug("src.document_processor not available or failed import.")
+            raw_text = self._extract_text_from_file(file_path)
+            if not raw_text or not raw_text.strip():
+                raise RuntimeError("Extracted text is empty")
+        
+            logger.info("✅ Text extraction complete (%d characters)", len(raw_text))
+        
+        except Exception as e:
+            logger.exception(f"❌ Text extraction failed: {str(e)}")
+            raise RuntimeError(f"Failed to extract text from document: {str(e)}")
 
-            if dp is not None:
-                # Try common shapes: process_document(file_path)
-                try:
-                    if hasattr(dp, "process_document") and callable(dp.process_document):
-                        logger.debug("Calling src.document_processor.process_document(...)")
-                        raw = dp.process_document(file_path)
-                        chunks = self._normalize_raw_chunks(raw, doc_uuid, title)
-                        logger.debug("src.document_processor.process_document returned %d chunks", len(chunks))
-                except Exception:
-                    logger.exception("src.document_processor.process_document raised an exception")
-
-                # Try DocumentProcessor class shape
-                if not chunks:
-                    try:
-                        if hasattr(dp, "DocumentProcessor"):
-                            DPClass = getattr(dp, "DocumentProcessor")
-                            dp_inst = DPClass()
-                            logger.debug("Using DocumentProcessor class from src.document_processor")
-                            if hasattr(dp_inst, "process"):
-                                raw = dp_inst.process(file_path)
-                                chunks = self._normalize_raw_chunks(raw, doc_uuid, title)
-                                logger.debug("DocumentProcessor.process returned %d chunks", len(chunks))
-                            elif hasattr(dp_inst, "create_chunks") and hasattr(dp_inst, "extract_text"):
-                                text = dp_inst.extract_text(file_path)
-                                raw = dp_inst.create_chunks(text)
-                                chunks = self._normalize_raw_chunks(raw, doc_uuid, title)
-                    except Exception:
-                        logger.exception("src.document_processor.DocumentProcessor usage failed")
-        except Exception:
-            logger.exception("Unexpected error while trying to use src.document_processor")
-
-        # 2) If no chunks from document_processor -> fallback to local extraction
+        # Chunk the text
+        logger.info("✂️ Step 2/3: Chunking text...")
+        chunks = self._chunk_text(raw_text, chunk_size=self.chunk_size, overlap=self.chunk_overlap)
+        logger.info("✅ Chunking complete - created %d chunks", len(chunks))
+    
         if not chunks:
-            logger.info("Falling back to local extraction and chunking for file: %s", file_path)
-            try:
-                raw_text = self._extract_text_from_file(file_path)
-                if not raw_text or not raw_text.strip():
-                    raise RuntimeError("Fallback extractor returned empty text.")
-                # chunk the text deterministically
-                raw_chunks = self._chunk_text(raw_text, chunk_size=self.chunk_size, overlap=self.chunk_overlap)
-                chunks = self._normalize_raw_chunks(raw_chunks, doc_uuid, title)
-                logger.info("Fallback extraction produced %d chunks", len(chunks))
-            except Exception as e:
-                logger.exception("Fallback extraction failed: %s", str(e))
-                raise RuntimeError(
-                    "Unable to process document: src.document_processor didn't return chunks and fallback extractor failed. "
-                    "Install a PDF/text extractor (pdfplumber or PyPDF2 or PyMuPDF) or fix src.document_processor. "
-                    f"Details: {e}"
-                )
+            raise RuntimeError("No chunks created from document")
 
-        # 3) Ensure Chroma manager exists
-        if not self.chroma_manager:
-            raise RuntimeError("ChromaManager not configured. Cannot add document chunks.")
-
-        # 4) Prepare and add to Chroma
-        docs_for_chroma = []
-        for c in chunks:
-            docs_for_chroma.append({
-                "id": c.get("id"),
-                "text": c.get("text", ""),
-                "metadata": c.get("metadata", {})
+        # Prepare metadata
+        logger.info("📝 Preparing metadata...")
+        metadata_list = []
+        for i, chunk in enumerate(chunks):
+            metadata_list.append({
+                "source": title,
+                "filename": filename,
+                "document_id": doc_uuid,
+                "chunk_index": i,
+                "total_chunks": len(chunks)
             })
-        try:
-            logger.info("Adding %d chunks to Chroma for document '%s' (id=%s)", len(docs_for_chroma), title, doc_uuid)
-            self.chroma_manager.add_documents(docs_for_chroma)
-        except Exception:
-            logger.exception("Failed to add chunks to Chroma")
-            raise RuntimeError("Failed to ingest document chunks into Chroma.")
 
-        # 5) Bookkeeping
+        # Add to ChromaDB with progress tracking
+        logger.info("💾 Step 3/3: Adding chunks to vector database...")
+        try:
+            # Process in batches to show progress for large documents
+            batch_size = 50
+            total_batches = (len(chunks) + batch_size - 1) // batch_size
+        
+            for batch_num in range(total_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min((batch_num + 1) * batch_size, len(chunks))
+            
+                batch_chunks = chunks[start_idx:end_idx]
+                batch_metadata = metadata_list[start_idx:end_idx]
+            
+                logger.info("📦 Processing batch %d/%d (chunks %d-%d)...", 
+                           batch_num + 1, total_batches, start_idx + 1, end_idx)
+            
+                self.chroma_manager.add_documents(batch_chunks, batch_metadata, doc_uuid)
+            
+            logger.info("✅ Successfully added all %d chunks to ChromaDB", len(chunks))
+        
+        except Exception as e:
+            logger.exception(f"❌ Failed to add chunks to ChromaDB: {str(e)}")
+            raise RuntimeError(f"Failed to ingest document chunks into Chroma: {str(e)}")
+
+        # Bookkeeping
         entry = {
             "document_id": doc_uuid,
             "title": title,
             "file_path": file_path,
-            "num_chunks": len(docs_for_chroma),
+            "num_chunks": len(chunks),
         }
         self.processed_documents.append(entry)
-        logger.info("Document processed successfully: %s", entry)
+        logger.info(f"🎉 Document processed successfully: {title} (ID: {doc_uuid})")
         return entry
 
     def _normalize_raw_chunks(self, raw_chunks: Any, doc_id_base: str, title: str) -> List[Dict[str, Any]]:
@@ -386,15 +394,14 @@ Answer:
         return stats
 
     # -----------------------
-    # Querying
+    # Querying with Hallucination Prevention
     # -----------------------
     def _build_context_block(self, relevant_chunks: List[Tuple[str, Optional[float], Dict]]) -> str:
         return "\n\n".join([f"[CHUNK {i+1}] {text}" for i, (text, score, meta) in enumerate(relevant_chunks)])
 
     def query(self, question: str, filter_metadata: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], List[Tuple[str, Optional[float], Dict]], Dict]:
         """
-        Retrieve relevant chunks and ask LLM for an answer.
-        Uses LLMIntegration._call_ollama_api in prompt-only mode.
+        Production-ready query method with universal hallucination prevention.
         """
         try:
             logger.info("Query received: %s", question)
@@ -402,13 +409,19 @@ Answer:
                 logger.error("No chroma_manager available for retrieval.")
                 return None, [], {"error": "no_chroma_manager"}
 
+            # Search for relevant chunks
             relevant_chunks = self.chroma_manager.search(question, top_k=self.retrieval_top_k, filter=filter_metadata)
+        
+            if not relevant_chunks:
+                logger.info("No relevant chunks found for query: %s", question)
+                return "I couldn't find any relevant information in the documents to answer your question.", [], self._build_empty_source_info()
+
             context_block = self._build_context_block(relevant_chunks)
             prompt = self.PROMPT_TEMPLATE.format(context_block=context_block, question=question)
 
             if not self.llm_integration:
                 logger.error("No llm_integration available to generate answers.")
-                return None, relevant_chunks, {"error": "no_llm_integration"}
+                return None, relevant_chunks, self._build_source_info(relevant_chunks)
 
             logger.info("Sending prompt to LLM (length=%d)", len(prompt))
             try:
@@ -417,50 +430,131 @@ Answer:
                 logger.debug("LLMIntegration signature mismatch; calling with (question, relevant_chunks) instead.")
                 result = self.llm_integration._call_ollama_api(question, relevant_chunks=relevant_chunks)
 
+            # Handle LLM failure
             if result is None:
-                logger.warning("LLM returned no result; attempting wider retrieval + retry.")
-                more_chunks = self.chroma_manager.search(question, top_k=max(10, self.retrieval_top_k * 2), filter=filter_metadata)
-                context_block2 = self._build_context_block(more_chunks)
-                prompt2 = self.PROMPT_TEMPLATE.format(context_block=context_block2, question=question)
-                result = self.llm_integration._call_ollama_api(prompt2, relevant_chunks=None)
-                if result:
-                    relevant_chunks = more_chunks
+                logger.warning("LLM returned no result, using fallback response.")
+                answer = "I found relevant information but couldn't generate a proper answer. Here are the relevant sections:\n\n" + "\n\n".join([f"- {chunk[0][:200]}..." for chunk in relevant_chunks[:3]])
+            else:
+                answer = result.strip()
 
-            answer = (result or "").strip()
+            # UNIVERSAL HALLUCINATION PREVENTION
+            verification_results = self._verify_answer_grounding(answer, relevant_chunks)
+            
+            # Apply corrections if needed
+            if not verification_results["is_grounded"]:
+                logger.warning(f"Answer verification failed: {verification_results['issues']}")
+                answer = self._apply_safety_corrections(answer, verification_results)
 
-            # Deterministic fallback for canonical terms
-            try:
-                lowered = answer.lower()
-                needed_terms = ["hybrid cloud", "edge cloud", "multi-cloud"]
-                missing_terms = [t for t in needed_terms if t not in lowered]
-                if missing_terms:
-                    all_chunks = []
-                    try:
-                        all_chunks = self.chroma_manager.get_all_chunks()
-                    except Exception:
-                        all_chunks = []
-                    found_terms = {}
-                    for term in missing_terms:
-                        tl = term.lower()
-                        for text, meta in all_chunks:
-                            if isinstance(text, str) and tl in text.lower():
-                                found_terms[term] = meta or {}
-                                break
-                    if found_terms:
-                        addition_lines = []
-                        for term, meta in found_terms.items():
-                            doc_title = meta.get("document_title") or meta.get("title") or meta.get("source") or meta.get("document_id", "unknown")
-                            addition_lines.append(f"Addendum (deterministic scan): '{term}' found in document: {doc_title}")
-                        answer = (answer + "\n\n" + "\n".join(addition_lines)).strip()
-                        logger.info("Deterministic fallback appended terms: %s", list(found_terms.keys()))
-            except Exception:
-                logger.exception("Deterministic fallback scan failed.")
-
-            source_info = {"retrieved_count": len(relevant_chunks)}
-            logger.info("Query processed successfully. Found %d relevant chunks", len(relevant_chunks))
+            # Build proper source information with verification results
+            source_info = self._build_source_info(relevant_chunks)
+            source_info["verification"] = verification_results
+        
+            logger.info("Query processed successfully. Found %d relevant chunks, verification confidence: %.2f", 
+                       len(relevant_chunks), verification_results["confidence"])
             return answer, relevant_chunks, source_info
 
         except Exception as e:
             logger.error("Error in RAGPipeline.query: %s", str(e))
             logger.debug(traceback.format_exc())
-            return None, [], {"error": str(e)}
+            return None, [], self._build_empty_source_info()
+
+    def _verify_answer_grounding(self, answer: str, context_chunks: List[Tuple[str, float, Dict]]) -> Dict[str, Any]:
+        """Verify that the answer is properly grounded in the context."""
+        if self.context_verifier:
+            return self.context_verifier.verify_answer_grounding(answer, context_chunks)
+        else:
+            # Fallback basic verification
+            return {
+                "is_grounded": True,
+                "confidence": 0.5,  # Conservative default
+                "issues": ["Context verifier not available"],
+                "missing_citations": [],
+                "hallucination_flags": []
+            }
+
+    def _apply_safety_corrections(self, original_answer: str, verification_results: Dict) -> str:
+        """Apply safety corrections to potentially hallucinated answers."""
+        if self.context_verifier:
+            return self.context_verifier.generate_safe_response(original_answer, verification_results)
+        else:
+            # Fallback safety correction
+            if verification_results.get("confidence", 0) < 0.4:
+                return "Based on the provided documents, I cannot find sufficient information to answer this question accurately."
+            else:
+                return f"Based on the available information: {original_answer}\n\nNote: Some details may not be fully supported by the provided documents."
+
+    def _build_source_info(self, relevant_chunks: List[Tuple[str, Optional[float], Dict]]) -> Dict[str, Any]:
+        """Build proper source information for the response."""
+        if not relevant_chunks:
+            return self._build_empty_source_info()
+    
+        # Extract unique documents
+        documents = set()
+        chunk_details = []
+    
+        for i, (text, score, metadata) in enumerate(relevant_chunks):
+            doc_name = metadata.get('source', 'Unknown Document')
+            documents.add(doc_name)
+        
+            chunk_details.append({
+                'document': doc_name,
+                'content_preview': text[:200] + "..." if len(text) > 200 else text,
+                'confidence': float(score) if score is not None else 0.0,
+                'chunk_id': metadata.get('chunk_id', f'chunk_{i+1}')
+            })
+    
+        # Determine primary source (document with most chunks)
+        doc_counts = {}
+        for chunk in relevant_chunks:
+            doc_name = chunk[2].get('source', 'Unknown Document')
+            doc_counts[doc_name] = doc_counts.get(doc_name, 0) + 1
+    
+        primary_source = max(doc_counts.items(), key=lambda x: x[1])[0] if doc_counts else "Unknown"
+    
+        return {
+            "total_sources": len(documents),
+            "documents": list(documents),
+            "primary_source": primary_source,
+            "chunk_details": chunk_details,
+            "retrieved_count": len(relevant_chunks)
+        }
+
+    def _build_empty_source_info(self) -> Dict[str, Any]:
+        """Build empty source information."""
+        return {
+            "total_sources": 0,
+            "documents": [],
+            "primary_source": "None",
+            "chunk_details": [],
+            "retrieved_count": 0
+        }
+
+    def delete_document(self, document_id: str) -> bool:
+        """
+        Delete a document from the vector store.
+        
+        Args:
+            document_id: The ID of the document to delete
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if self.chroma_manager:
+                self.chroma_manager.delete_document(document_id)
+                
+                # Remove from processed documents
+                self.processed_documents = [
+                    doc for doc in self.processed_documents 
+                    if doc.get('document_id') != document_id
+                ]
+                
+                logger.info(f"Successfully deleted document: {document_id}")
+                return True
+            else:
+                logger.error("No chroma_manager available for deletion")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error deleting document {document_id}: {str(e)}")
+            return False

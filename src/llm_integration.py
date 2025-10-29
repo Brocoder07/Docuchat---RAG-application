@@ -1,8 +1,9 @@
-# src/llm_integration.py
+# src/llm_integration.py - FIXED VERSION
 import logging
 import requests
 import time
 import traceback
+import json
 from typing import Optional, List, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -10,11 +11,7 @@ logger = logging.getLogger(__name__)
 
 class LLMIntegration:
     """
-    Integration helper for Ollama-based LLMs.
-
-    - _call_ollama_api(question, relevant_chunks=None):
-        - If relevant_chunks is None -> treat 'question' as a full prompt and call Ollama.
-        - If relevant_chunks is provided -> build prompt from question + chunks and call Ollama.
+    Integration helper for Ollama-based LLMs with proper streaming response handling.
     """
 
     def __init__(self, model_name: str = "llama3.2:1b-instruct-q4_1", temperature: float = 0.2):
@@ -23,7 +20,6 @@ class LLMIntegration:
         self.initialized = False
 
     def initialize(self, use_openai: bool = False):
-        # Minimal initialization checks; in your project this may be more elaborate.
         logger.info("Ollama is running with model: %s", self.model_name)
         logger.info("Model %s is ready to use!", self.model_name)
         self.initialized = True
@@ -41,36 +37,154 @@ class LLMIntegration:
 
     def _build_dynamic_prompt(self, question: str, context: str) -> str:
         """
-        Build a deterministic, instruction-heavy prompt that asks the model to only use the context.
+        Build a robust, universal prompt that works for ANY document type.
         """
+        # Universal rules that work for all document types
+        universal_rules = (
+            "CRITICAL INSTRUCTIONS - READ CAREFULLY:\n"
+            "You are an assistant that answers using ONLY the information present in the provided Context.\n"
+            "You MUST follow these rules exactly:\n\n"
+        
+            "CONTEXT RULES:\n"
+            "1. Use ONLY the information from the Context below. Do not use any prior knowledge.\n"
+            "2. If information is missing from Context, say 'The context does not provide information about X'\n"
+            "3. Do not add, infer, or assume any information not explicitly stated\n"
+            "4. Do not make comparisons, draw conclusions, or provide analysis beyond what's directly stated\n"
+            "5. If you cannot answer based on Context, say so explicitly\n\n"
+        
+            "CITATION RULES:\n" 
+            "6. ALWAYS reference which chunks contain the information (e.g., 'Based on Chunk 1 and Chunk 3')\n"
+            "7. When listing items, cite the specific chunk for each item\n"
+            "8. If information appears in multiple chunks, mention all relevant chunks\n\n"
+        
+            "LANGUAGE RULES:\n"
+            "9. Avoid speculative language (probably, might be, could be, I think, I believe)\n"
+            "10. Avoid absolute statements (always, never, all, every) unless explicitly stated\n"
+            "11. Avoid vague quantifiers (many, several, some) - be specific about what's in Context\n"
+            "12. Do not reference external knowledge, studies, or common practices\n\n"
+        
+            "STRUCTURE RULES:\n"
+            "13. For lists or collections mentioned in Context, list them exactly as they appear\n"
+            "14. For technical terms, use the exact terminology from Context\n"
+            "15. For names, titles, or proper nouns, use the exact spelling from Context\n"
+            "16. For numerical data, use the exact values from Context\n\n"
+        
+            "SAFETY RULES:\n"
+            "17. If Context contains conflicting information, acknowledge the conflict\n"
+            "18. If you're unsure, err on the side of caution and admit limitations\n"
+            "19. Format your answer clearly but do not invent structure not in Context\n"
+            "20. Do not combine information from different documents unless explicitly connected in Context\n\n"
+        )
+    
+        # Add question-type specific guidance (not document-specific)
+        question_lower = question.lower()
+        question_specific_guidance = self._get_question_specific_guidance(question_lower)
+    
         prompt_template = (
-            "You are an assistant that answers using ONLY the information present in the provided Context.\n\n"
-            "Context:\n{context}\n\n"
-            "Instructions:\n"
-            "1. Using only the text in Context above, answer the Question exactly.\n"
-            "2. If the requested item is not present in the Context, explicitly say 'Not mentioned.'\n"
-            "3. Do not hallucinate or invent any information not contained in the Context.\n"
-            "4. When listing items, cite the CHUNK number shown in Context for each item.\n"
-            "5. Keep answers concise and factual.\n\n"
-            "6. If asked to summarize, provide a brief summary in 40-50 words, do not hallucinate or mix up content and create new stuff.\n\n"
-            "7. Always format your answer in markdown.\n\n"
-            "8. If asked to explain or asked \"what is\", provide a clear and simple explanation based on the Context, Recheck and Recheck the document properly before generating a response.\n\n"
-            "Question: {question}\n\n"
-            "Answer:\n"
+            f"{universal_rules}"
+            f"{question_specific_guidance}"
+            "CONTEXT:\n{context}\n\n"
+            "QUESTION: {question}\n\n"
+            "YOUR ANSWER (following all rules above):"
         )
         return prompt_template.format(context=context, question=question)
 
+    def _get_question_specific_guidance(self, question_lower: str) -> str:
+        """Get question-type specific guidance that works for any document."""
+        guidance = ""
+    
+        # List/collection questions (works for projects, products, categories, etc.)
+        if any(keyword in question_lower for keyword in ['list', 'what are', 'which', 'name the']):
+            guidance += (
+                "LIST-SPECIFIC RULES:\n"
+                "21. List items exactly as they appear in Context, in the order they appear\n"
+                "22. Do not group, categorize, or reorganize items unless Context does so\n"
+                "23. If Context lists items with bullet points or numbers, maintain that structure\n"
+                "24. Cite the specific chunk where each listed item appears\n\n"
+            )
+    
+        # Technical/description questions
+        if any(keyword in question_lower for keyword in ['describe', 'explain', 'what is', 'how does']):
+            guidance += (
+                "DESCRIPTION RULES:\n"
+                "25. Use the exact technical terms and definitions from Context\n"
+                "26. Do not simplify or rephrase technical concepts unless Context does so\n"
+                "27. Include specific measurements, specifications, or details mentioned in Context\n"
+                "28. Reference the chunks that contain the detailed descriptions\n\n"
+            )
+    
+        # Comparison questions
+        if any(keyword in question_lower for keyword in ['compare', 'difference', 'versus', 'vs']):
+            guidance += (
+                "COMPARISON RULES:\n"
+                "29. Only compare elements that are explicitly compared in Context\n"
+                "30. Do not infer comparisons that are not directly stated\n"
+                "31. If Context doesn't compare items, say 'The context does not compare X and Y'\n"
+                "32. Reference chunks where comparison information appears\n\n"
+            )
+    
+        # Quantitative questions
+        if any(keyword in question_lower for keyword in ['how many', 'how much', 'percentage', 'number of']):
+            guidance += (
+                "QUANTITATIVE RULES:\n"
+                "33. Use exact numbers, percentages, or quantities from Context\n"
+                "34. Do not calculate, estimate, or approximate unless Context does so\n"
+                "35. Include units of measurement exactly as they appear in Context\n"
+                "36. Reference chunks containing the quantitative data\n\n"
+            )
+    
+        return guidance
+
+    def _parse_ollama_streaming_response(self, response_text: str) -> str:
+        """
+        Parse Ollama's streaming JSON response and extract the complete answer.
+        """
+        try:
+            lines = response_text.strip().split('\n')
+            full_response = ""
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                try:
+                    # Parse each JSON object
+                    data = json.loads(line)
+                    
+                    # Extract the response part
+                    if 'response' in data:
+                        full_response += data['response']
+                        
+                    # Check if this is the final chunk
+                    if data.get('done', False):
+                        break
+                        
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse JSON line: {line}")
+                    continue
+                    
+            return full_response.strip()
+            
+        except Exception as e:
+            logger.error(f"Error parsing Ollama streaming response: {str(e)}")
+            # Fallback: try to extract any text that looks like a response
+            if 'response' in response_text:
+                import re
+                matches = re.findall(r'"response":"([^"]*)"', response_text)
+                return ' '.join(matches).strip()
+            return ""
+
     def _call_ollama_with_retry(self, prompt: str, max_retries: int = 3, base_timeout: int = 60) -> Optional[str]:
         """
-        Low-level HTTP call to Ollama with retries and exponential backoff.
-        Assumes Ollama is running locally on port 11434.
+        Low-level HTTP call to Ollama with proper streaming response handling.
         """
         url = "http://localhost:11434/api/generate"
         payload = {
             "model": self.model_name,
             "prompt": prompt,
             "temperature": self.temperature,
-            # include other params (max_tokens, top_p, etc.) if needed
+            "stream": False,  # IMPORTANT: Set to False to get complete response
         }
         headers = {"Content-Type": "application/json"}
         last_exc = None
@@ -80,38 +194,26 @@ class LLMIntegration:
                 logger.debug("Calling Ollama (attempt %d) with timeout=%ds", attempt, base_timeout)
                 resp = requests.post(url, json=payload, headers=headers, timeout=base_timeout)
                 resp.raise_for_status()
-                # Response shapes may vary; attempt tolerant extraction
+                
+                # Parse the response
                 try:
                     data = resp.json()
-                except Exception:
-                    text = resp.text
-                    logger.debug("Ollama returned non-json response: %s", text[:500])
-                    return text
-
-                # Common shapes: {"response": "<text>"} or {"completions": [{"data": {"content":"..."}}]}
-                if isinstance(data, dict):
-                    if "response" in data:
-                        return data["response"]
-                    if "text" in data:
-                        return data["text"]
-                    # try completions
-                    if "completions" in data:
-                        comps = data["completions"]
-                        if isinstance(comps, list) and comps:
-                            possible = comps[0].get("data") or comps[0]
-                            if isinstance(possible, dict):
-                                # find textual fields
-                                for k in ("content", "text", "output", "response"):
-                                    if k in possible:
-                                        return possible[k]
-                            else:
-                                # fallback to string conversion
-                                return str(possible)
-                    # fallback: return stringified json
-                    return str(data)
-                else:
-                    # non-dict body; return string
-                    return str(data)
+                    
+                    # Handle both streaming and non-streaming responses
+                    if 'response' in data:
+                        return data['response']
+                    else:
+                        # If we get streaming format, parse it
+                        response_text = resp.text
+                        if response_text.strip().startswith('{'):
+                            return self._parse_ollama_streaming_response(response_text)
+                        else:
+                            return response_text
+                            
+                except json.JSONDecodeError:
+                    # Response is not JSON, return as text
+                    return resp.text
+                    
             except requests.exceptions.RequestException as e:
                 last_exc = e
                 wait = 2 ** (attempt - 1)
@@ -124,12 +226,6 @@ class LLMIntegration:
     def _call_ollama_api(self, question: str, relevant_chunks: Optional[List[Tuple[str, Optional[float], Dict]]] = None) -> Optional[str]:
         """
         Call Ollama API with optimized prompt and parameters.
-
-        Supports two calling modes:
-         - _call_ollama_api(question, relevant_chunks): builds prompt from question+chunks
-         - _call_ollama_api(prompt, None): prompt is already constructed and is passed directly.
-
-        Returns the raw string output from the model, or None on failure.
         """
         try:
             # If relevant_chunks is None, assume `question` is already a full prompt.

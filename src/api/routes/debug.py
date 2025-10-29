@@ -80,3 +80,39 @@ async def reset_collection():
         return {"message": "Collection reset successfully"}
     except Exception as e:
         return {"error": str(e)}
+    
+@router.get("/chunks-by-document")
+async def debug_chunks_by_document(document_id: str = None):
+    """Debug endpoint to see all chunks for a specific document."""
+    try:
+        # Get all chunks from ChromaDB
+        all_chunks = rag_service.rag_pipeline.chroma_manager.get_all_chunks()
+        
+        if document_id:
+            # Filter by document
+            filtered_chunks = [
+                chunk for chunk in all_chunks 
+                if chunk.get('metadata', {}).get('document_id') == document_id
+            ]
+        else:
+            filtered_chunks = all_chunks
+        
+        # Format for display
+        chunk_details = []
+        for chunk in filtered_chunks:
+            metadata = chunk.get('metadata', {})
+            chunk_details.append({
+                'document_id': metadata.get('document_id'),
+                'source': metadata.get('source'),
+                'chunk_index': metadata.get('chunk_index'),
+                'content_preview': chunk.get('text', '')[:100] + "...",
+                'full_content': chunk.get('text', '')[:500]
+            })
+        
+        return {
+            "total_chunks": len(filtered_chunks),
+            "chunks": chunk_details
+        }
+        
+    except Exception as e:
+        return {"error": str(e)}

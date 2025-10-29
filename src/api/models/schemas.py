@@ -1,3 +1,4 @@
+# src/models/schemas.py - FIXED VERSION
 """
 Enhanced Pydantic models for request/response schemas.
 """
@@ -5,10 +6,17 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 class HealthResponse(BaseModel):
-    """Health check response."""
+    """Health check response - FIXED to match actual data structure."""
     status: str
-    model: str
-    documents_loaded: int
+    documents_processed: int = Field(..., description="Number of documents processed")
+    total_chunks: int = Field(..., description="Total chunks in vector store")
+    llm_ready: bool = Field(..., description="Whether LLM is ready")
+    llm_model: str = Field(..., description="LLM model name")
+    vector_store_initialized: bool = Field(..., description="Whether vector store is initialized")
+    
+    # Optional fields for backward compatibility
+    model: Optional[str] = Field(None, description="Backward compatibility - use llm_model")
+    documents_loaded: Optional[int] = Field(None, description="Backward compatibility - use documents_processed")
 
 class QueryRequest(BaseModel):
     """Query request schema."""
@@ -27,7 +35,7 @@ class QueryResponse(BaseModel):
     answer: str
     relevant_sources: int
     confidence: str
-    source_info: SourceInfo  # Add detailed source information
+    source_info: SourceInfo
 
 class UploadResponse(BaseModel):
     """Upload response schema."""

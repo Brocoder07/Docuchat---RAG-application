@@ -32,19 +32,30 @@ class APIClient:
     
     def upload_document(self, file_data, filename: str) -> Dict[str, Any]:
         """
-        Upload a document to the API.
+        Upload a document to the API with better timeout handling.
         """
         try:
             files = {"file": (filename, file_data)}
+        
+            # Use a longer timeout for large documents
+            timeout = 120  # 2 minutes for large PDFs
+        
             response = requests.post(
                 f"{self.base_url}/documents/upload", 
                 files=files,
-                timeout=30
+                timeout=timeout
             )
+        
             return {
                 "success": response.status_code == 200,
                 "data": response.json() if response.status_code == 200 else None,
                 "error": response.json().get('detail') if response.status_code != 200 else None
+            }
+        
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "error": f"Upload timed out after 120 seconds. The document is large and taking longer to process. Check the server logs for progress."
             }
         except requests.exceptions.RequestException as e:
             return {
