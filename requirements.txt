@@ -1,0 +1,30 @@
+# Core AI & ML
+langchain==0.1.14
+langchain-community==0.0.34
+sentence-transformers==2.7.0
+huggingface-hub==0.23.2
+groq==0.5.0
+
+# Vector Database
+chromadb==0.4.22
+
+# Document Processing
+pypdf2==3.0.1
+python-docx==1.1.0
+pdfplumber==0.10.0
+pymupdf==1.24.4
+
+# Web Framework & API
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+
+# Frontend
+streamlit==1.32.0
+
+# Environment & Utilities
+python-dotenv==1.0.1
+requests==2.31.0
+
+# Testing & Development
+pytest==7.4.4
