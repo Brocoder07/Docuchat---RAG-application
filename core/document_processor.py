@@ -1,12 +1,15 @@
 """
 Intelligent document processor with multiple PDF backend support.
-Senior Engineer Principle: Robust extraction with multiple fallbacks.
+FIXED: Made the text splitter "resume-aware" by adding section headers
+as custom separators.
 """
 import logging
 import os
 import re
 from typing import List, Dict, Optional
 import pandas as pd
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from core.config import config
 
@@ -20,6 +23,32 @@ class DocumentProcessor:
     
     def __init__(self):
         self.supported_extensions = config.files.ALLOWED_EXTENSIONS
+        
+        # -----------------------------------------------------------------
+        # 🚨 FIXED: Added resume headers as custom separators
+        # This forces chunks to be created that group headers with their content.
+        # -----------------------------------------------------------------
+        self.resume_separators = [
+            "\n\nEDUCATION\n",
+            "\n\nTECHNICAL SKILLS\n",
+            "\n\nEXPERIENCE\n",
+            "\n\nPROJECTS\n",
+            "\n\nPUBLICATIONS\n",
+            "\n\nCERTIFICATIONS\n",
+            "\n\n",
+            "\n",
+            " ",
+            ""
+        ]
+        
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.rag.CHUNK_SIZE,
+            chunk_overlap=config.rag.CHUNK_OVERLAP,
+            length_function=len,
+            add_start_index=True,
+            separators=self.resume_separators  # 🚨 Use the custom separators
+        )
+        # -----------------------------------------------------------------
     
     def process_file(self, file_path: str, filename: str) -> Dict[str, any]:
         """
@@ -68,8 +97,8 @@ class DocumentProcessor:
                     "chunks": []
                 }
             
-            # Smart chunking
-            chunks = self._smart_chunking(text)
+            # Use the robust text splitter
+            chunks = self.text_splitter.split_text(text)
             
             logger.info(f"✅ Successfully processed {filename}: {len(chunks)} chunks")
             
@@ -173,82 +202,6 @@ class DocumentProcessor:
         text = re.sub(r'(\w)-\s*\n\s*(\w)', r'\1\2', text)  # Fix hyphenated words
         
         return text.strip()
-    
-    def _smart_chunking(self, text: str) -> List[str]:
-        """
-        Intelligent chunking that preserves semantic boundaries.
-        Senior Engineer Principle: Balance chunk size with content coherence.
-        """
-        if not text:
-            return []
-        
-        # First, try to split by major sections (headings, etc.)
-        sections = self._split_into_sections(text)
-        
-        chunks = []
-        for section in sections:
-            if len(section) <= config.rag.CHUNK_SIZE:
-                # Section is small enough to be one chunk
-                if section.strip():
-                    chunks.append(section.strip())
-            else:
-                # Split large sections by sentences/paragraphs
-                section_chunks = self._split_section(section)
-                chunks.extend(section_chunks)
-        
-        # Final validation
-        valid_chunks = [chunk for chunk in chunks if chunk and len(chunk) > 50]
-        
-        logger.debug(f"Created {len(valid_chunks)} chunks from {len(text)} characters")
-        return valid_chunks
-    
-    def _split_into_sections(self, text: str) -> List[str]:
-        """Better section splitting for resumes."""
-        # Split by major resume sections (case insensitive)
-        sections = re.split(r'\n\s*(EDUCATION|TECHNICAL SKILLS|EXPERIENCE|PROJECTS|PUBLICATIONS|CERTIFICATIONS)\s*\n', text, flags=re.IGNORECASE)
-        
-        # Reconstruct sections with their headers
-        refined_sections = []
-        i = 0
-        while i < len(sections):
-            if sections[i].strip() and i + 1 < len(sections):
-                # This is content, previous was header
-                header = sections[i-1] if i > 0 else "HEADER"
-                content = sections[i]
-                refined_sections.append(f"{header}\n{content}")
-                i += 1
-            elif sections[i].strip():
-                refined_sections.append(sections[i])
-            i += 1
-        
-        return refined_sections
-    
-    def _split_section(self, text: str) -> List[str]:
-        """Split a section into chunks of appropriate size."""
-        sentences = re.split(r'[.!?]+', text)
-        
-        chunks = []
-        current_chunk = ""
-        
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            
-            # If adding this sentence would exceed chunk size, save current chunk
-            if current_chunk and len(current_chunk) + len(sentence) > config.rag.CHUNK_SIZE:
-                chunks.append(current_chunk.strip())
-                # Start new chunk with overlap
-                overlap_start = max(0, len(current_chunk) - config.rag.CHUNK_OVERLAP)
-                current_chunk = current_chunk[overlap_start:] + " " + sentence
-            else:
-                current_chunk += " " + sentence if current_chunk else sentence
-        
-        # Add the last chunk
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-        
-        return chunks
 
 # Global document processor instance
 document_processor = DocumentProcessor()

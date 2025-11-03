@@ -1,9 +1,10 @@
 """
-Main RAG pipeline orchestrator - FIXED with all required methods.
+Main RAG pipeline orchestrator - Upgraded with Intelligent Query Router.
 """
 import logging
 import uuid
 import os
+import re  # 🚨 Import regex
 from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime
 
@@ -53,6 +54,36 @@ class RAGPipeline:
             self.initialized = False
             return False
     
+    # -----------------------------------------------------------------
+    # 🚨 ADDED: New helper method to clean queries
+    # -----------------------------------------------------------------
+    def _clean_query_for_routing(self, question: str) -> str:
+        """
+        Removes constraints (e.g., "in 100 words") from a query
+        to improve routing and HyDE generation.
+        """
+        # Regex to find common constraints
+        constraint_patterns = [
+            r"in \d+-\d+ words",
+            r"in \d+ words",
+            r"list \d+ items",
+            r"list top \d+",
+            r"in \d+ sentences",
+        ]
+        
+        cleaned_question = question
+        for pattern in constraint_patterns:
+            cleaned_question = re.sub(pattern, "", cleaned_question, flags=re.IGNORECASE).strip()
+        
+        # Remove any trailing "in" or "list"
+        cleaned_question = re.sub(r"\b(in|list)$", "", cleaned_question, flags=re.IGNORECASE).strip()
+        
+        if cleaned_question != question:
+            logger.info(f"Original query for routing: '{question}' -> Cleaned: '{cleaned_question}'")
+        
+        return cleaned_question
+    # -----------------------------------------------------------------
+    
     def _build_empty_source_info(self) -> Dict[str, Any]:
         """Build empty source information."""
         return {
@@ -62,217 +93,6 @@ class RAGPipeline:
             "chunk_details": [],
             "retrieved_count": 0
         }
-    
-    def _build_context(self, relevant_chunks: List[Tuple]) -> str:
-        """Build clean context from relevant chunks."""
-        context_parts = []
-        
-        for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
-            source = metadata.get('source', 'Unknown')
-            context_parts.append(f"[Source: {source} | Relevance: {score:.2f}]")
-            context_parts.append(chunk_text)
-            context_parts.append("")  # Empty line between chunks
-        
-        return "\n".join(context_parts)
-    
-    def _prepare_source_info(self, relevant_chunks: List[Tuple]) -> Dict[str, Any]:
-        """Prepare structured source information."""
-        if not relevant_chunks:
-            return self._build_empty_source_info()
-        
-        # Extract unique documents
-        documents = set()
-        chunk_details = []
-        
-        for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
-            doc_name = metadata.get('source', 'Unknown Document')
-            documents.add(doc_name)
-            
-            chunk_details.append({
-                'document': doc_name,
-                'content_preview': chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
-                'confidence': float(score),
-                'chunk_id': metadata.get('chunk_id', f'chunk_{i+1}')
-            })
-        
-        # Determine primary source (document with highest total confidence)
-        source_scores = {}
-        for chunk in relevant_chunks:
-            doc_name = chunk[2].get('source', 'Unknown Document')
-            score = chunk[1]
-            source_scores[doc_name] = source_scores.get(doc_name, 0) + score
-        
-        primary_source = max(source_scores.items(), key=lambda x: x[1])[0] if source_scores else "Unknown"
-        
-        return {
-            "total_sources": len(documents),
-            "documents": list(documents),
-            "primary_source": primary_source,
-            "chunk_details": chunk_details,
-            "retrieved_count": len(relevant_chunks)
-        }
-
-    # REST OF YOUR EXISTING METHODS (process_document, query, etc.) REMAIN THE SAME
-    # Just make sure they use self.vector_store and self.llm_service instead of direct imports
-    
-    def process_document(self, file_path: str, filename: str) -> Dict[str, Any]:
-        """
-        Process document end-to-end with progress tracking.
-        Senior Engineer Principle: Clear input/output contracts.
-        """
-        if not self.initialized:
-            return {
-                "success": False,
-                "error": "Pipeline not initialized",
-                "document_id": None
-            }
-        
-        try:
-            # Generate unique document ID
-            document_id = str(uuid.uuid4())
-            logger.info(f"📦 Processing document: {filename} (ID: {document_id})")
-            
-            # Step 1: Extract and chunk text
-            processing_result = document_processor.process_file(file_path, filename)
-            if not processing_result["success"]:
-                return {
-                    "success": False,
-                    "error": processing_result["error"],
-                    "document_id": document_id
-                }
-            
-            chunks = processing_result["chunks"]
-            if not chunks:
-                return {
-                    "success": False,
-                    "error": "No chunks generated from document",
-                    "document_id": document_id
-                }
-            
-            # Step 2: Prepare metadata for vector store
-            metadata_list = []
-            for i, chunk in enumerate(chunks):
-                metadata_list.append({
-                    "source": filename,
-                    "filename": filename,
-                    "document_id": document_id,
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "processed_at": datetime.now().isoformat()
-                })
-            
-            # Step 3: Store in vector database
-            if not vector_store.add_documents(chunks, metadata_list, document_id):
-                return {
-                    "success": False,
-                    "error": "Failed to store document in vector database",
-                    "document_id": document_id
-                }
-            
-            # Step 4: Track processed document
-            document_info = {
-                "document_id": document_id,
-                "filename": filename,
-                "file_path": file_path,
-                "chunks_count": len(chunks),
-                "processed_at": datetime.now().isoformat()
-            }
-            self.processed_documents.append(document_info)
-            
-            logger.info(f"✅ Document processed successfully: {filename} ({len(chunks)} chunks)")
-            
-            return {
-                "success": True,
-                "document_id": document_id,
-                "chunks_count": len(chunks),
-                "filename": filename
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Document processing failed: {str(e)}")
-            return {
-                "success": False,
-                "error": f"Processing error: {str(e)}",
-                "document_id": None
-            }
-    
-    def query(self, question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Query documents with proper context management.
-        FIXED: Always return source_info even when no chunks found
-        """
-        if not self.initialized:
-            return {
-                "success": False,
-                "answer": "Pipeline not initialized. Please check system status.",
-                "sources": [],
-                "source_info": self._build_empty_source_info(),  # 🚨 ADD THIS
-                "error": "Pipeline not initialized"
-            }
-    
-        try:
-            logger.info(f"🔍 Processing query: {question}")
-        
-            # Step 1: Retrieve relevant chunks
-            relevant_chunks = vector_store.search(question, top_k=top_k)
-        
-            if not relevant_chunks:
-                logger.info(f"❌ No relevant content found for: {question}")
-                return {
-                    "success": True,
-                    "answer": "I couldn't find any relevant information in the documents to answer your question.",
-                    "sources": [],
-                    "source_info": self._build_empty_source_info(),  # 🚨 ADD THIS
-                    "confidence": "very low",
-                    "chunks_retrieved": 0,
-                    "model_used": "none"
-                }
-        
-            # Step 2: Build context from relevant chunks
-            context = self._build_context(relevant_chunks)
-        
-            # Step 3: Generate answer using LLM
-            llm_result = llm_service.generate_answer(question, context)
-        
-            if not llm_result["success"]:
-                return {
-                    "success": False,
-                    "answer": "I encountered an error while generating the answer.",
-                    "sources": [],
-                    "source_info": self._build_empty_source_info(),  # 🚨 ADD THIS
-                    "error": llm_result.get("error", "LLM error")
-                }
-        
-            # Step 4: Prepare source information
-            source_info = self._prepare_source_info(relevant_chunks)
-        
-            # Step 5: Calculate confidence
-            confidence = self._calculate_confidence(relevant_chunks, llm_result["answer"])
-        
-            # Step 6: Track query for analytics
-            self._track_query(question, llm_result["answer"], len(relevant_chunks))
-        
-            logger.info(f"✅ Query processed successfully: {len(relevant_chunks)} chunks used")
-        
-            return {
-                "success": True,
-                "answer": llm_result["answer"],
-                "sources": relevant_chunks,
-                "source_info": source_info,
-                "confidence": confidence,
-                "chunks_retrieved": len(relevant_chunks),
-                "model_used": llm_result.get("model", "unknown")
-            }
-        
-        except Exception as e:
-            logger.error(f"❌ Query processing failed: {str(e)}")
-            return {
-                "success": False,
-                "answer": "I encountered an error while processing your query.",
-                "sources": [],
-                "source_info": self._build_empty_source_info(),  # 🚨 ADD THIS
-                "error": str(e)
-            }
     
     def _build_context(self, relevant_chunks: List[Tuple]) -> str:
         """Build clean context from relevant chunks."""
@@ -327,6 +147,201 @@ class RAGPipeline:
             "chunk_details": chunk_details,
             "retrieved_count": len(relevant_chunks)
         }
+
+    
+    def process_document(self, file_path: str, filename: str) -> Dict[str, Any]:
+        """
+        Process document end-to-end with progress tracking.
+        Senior Engineer Principle: Clear input/output contracts.
+        """
+        if not self.initialized:
+            return {
+                "success": False,
+                "error": "Pipeline not initialized",
+                "document_id": None
+            }
+        
+        try:
+            # Generate unique document ID
+            document_id = str(uuid.uuid4())
+            logger.info(f"📦 Processing document: {filename} (ID: {document_id})")
+            
+            # Step 1: Extract and chunk text
+            processing_result = document_processor.process_file(file_path, filename)
+            if not processing_result["success"]:
+                return {
+                    "success": False,
+                    "error": processing_result["error"],
+                    "document_id": document_id
+                }
+            
+            chunks = processing_result["chunks"]
+            if not chunks:
+                return {
+                    "success": False,
+                    "error": "No chunks generated from document",
+                    "document_id": document_id
+                }
+            
+            # Step 2: Prepare metadata for vector store
+            metadata_list = []
+            for i, chunk in enumerate(chunks):
+                metadata_list.append({
+                    "source": filename,
+                    "filename": filename,  # 🚨 Ensure 'filename' is saved
+                    "document_id": document_id,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                    "processed_at": datetime.now().isoformat()
+                })
+            
+            # Step 3: Store in vector database
+            if not vector_store.add_documents(chunks, metadata_list, document_id):
+                return {
+                    "success": False,
+                    "error": "Failed to store document in vector database",
+                    "document_id": document_id
+                }
+            
+            # Step 4: Track processed document
+            document_info = {
+                "document_id": document_id,
+                "filename": filename,
+                "file_path": file_path,
+                "chunks_count": len(chunks),
+                "processed_at": datetime.now().isoformat()
+            }
+            self.processed_documents.append(document_info)
+            
+            logger.info(f"✅ Document processed successfully: {filename} ({len(chunks)} chunks)")
+            
+            return {
+                "success": True,
+                "document_id": document_id,
+                "chunks_count": len(chunks),
+                "filename": filename
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Document processing failed: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Processing error: {str(e)}",
+                "document_id": None
+            }
+    
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: Updated `query` to use the cleaner + router
+    # -----------------------------------------------------------------
+    def query(self, question: str, top_k: Optional[int] = None, filename: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Query documents using an intelligent router for specific vs. general queries.
+        """
+        if not self.initialized:
+            return {
+                "success": False,
+                "answer": "Pipeline not initialized. Please check system status.",
+                "sources": [],
+                "source_info": self._build_empty_source_info(),
+                "error": "Pipeline not initialized"
+            }
+    
+        try:
+            logger.info(f"🔍 Processing query: {question}")
+            
+            # -----------------------------------------------------------------
+            # 🚨 MODIFIED: Step 1 - Clean query and then route it
+            # -----------------------------------------------------------------
+            
+            # Clean the query for routing and HyDE
+            cleaned_question = self._clean_query_for_routing(question)
+            
+            # Route the cleaned query
+            query_type = llm_service.route_query(cleaned_question)
+            
+            if query_type == "general":
+                logger.info("🔄 Query is 'general'. Rewriting with HyDE...")
+                # Use the cleaned question for HyDE
+                hyde_result = llm_service.generate_hypothetical_query(cleaned_question)
+                search_query = hyde_result["query"]
+                
+                if hyde_result["success"]:
+                    logger.info(f"✅ HyDE query: {search_query[:80]}...")
+                else:
+                    logger.warning(f"⚠️ HyDE failed, falling back to original query. Error: {hyde_result['error']}")
+                    search_query = cleaned_question # Fallback
+            else:
+                logger.info("✅ Query is 'specific'. Using original query for search.")
+                search_query = question # Use the ORIGINAL, uncleanead query for specific search
+            # -----------------------------------------------------------------
+            
+            # Step 2: Retrieve relevant chunks (using the determined search_query)
+            relevant_chunks = vector_store.search(
+                search_query, 
+                top_k=top_k, 
+                filename=filename
+            )
+        
+            if not relevant_chunks:
+                logger.info(f"❌ No relevant content found for: {question}")
+                return {
+                    "success": True,
+                    "answer": "I couldn't find any relevant information in the documents to answer your question.",
+                    "sources": [],
+                    "source_info": self._build_empty_source_info(),
+                    "confidence": "very low",
+                    "chunks_retrieved": 0,
+                    "model_used": "none"
+                }
+        
+            # Step 3: Build context from relevant chunks
+            context = self._build_context(relevant_chunks)
+        
+            # Step 4: Generate answer using LLM
+            # 🚨 IMPORTANT: Use the ORIGINAL question here so the LLM can see
+            # the constraints (e.g., "in 120-150 words")
+            llm_result = llm_service.generate_answer(question, context)
+        
+            if not llm_result["success"]:
+                return {
+                    "success": False,
+                    "answer": "I encountered an error while generating the answer.",
+                    "sources": [],
+                    "source_info": self._build_empty_source_info(),
+                    "error": llm_result.get("error", "LLM error")
+                }
+        
+            # Step 5: Prepare source information
+            source_info = self._prepare_source_info(relevant_chunks)
+        
+            # Step 6: Calculate confidence
+            confidence = self._calculate_confidence(relevant_chunks, llm_result["answer"])
+        
+            # Step 7: Track query for analytics
+            self._track_query(question, llm_result["answer"], len(relevant_chunks))
+        
+            logger.info(f"✅ Query processed successfully: {len(relevant_chunks)} chunks used")
+        
+            return {
+                "success": True,
+                "answer": llm_result["answer"],
+                "sources": relevant_chunks,
+                "source_info": source_info,
+                "confidence": confidence,
+                "chunks_retrieved": len(relevant_chunks),
+                "model_used": llm_result.get("model", "unknown")
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Query processing failed: {str(e)}")
+            return {
+                "success": False,
+                "answer": "I encountered an error while processing your query.",
+                "sources": [],
+                "source_info": self._build_empty_source_info(),
+                "error": str(e)
+            }
+
     
     def _calculate_confidence(self, relevant_chunks: List[Tuple], answer: str) -> str:
         """Calculate answer confidence based on multiple factors."""

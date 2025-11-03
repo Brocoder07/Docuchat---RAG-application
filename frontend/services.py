@@ -144,14 +144,18 @@ class APIClient:
                 "error": f"Upload failed: {str(e)}"
             }
     
-    def query_documents(self, question: str, top_k: int = 5) -> Dict[str, Any]:
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: Updated `query_documents` to send `filename`
+    # -----------------------------------------------------------------
+    def query_documents(self, question: str, top_k: int = 5, filename: Optional[str] = None) -> Dict[str, Any]:
         """Query documents with comprehensive error handling and longer timeout."""
         return self._make_request(
             "POST",
             "/query",
             timeout=self.query_timeout,  # 🚨 Use query-specific timeout
-            json={"question": question, "top_k": top_k}
+            json={"question": question, "top_k": top_k, "filename": filename} # 🚨 Send filename
         )
+    # -----------------------------------------------------------------
     
     def list_documents(self) -> Dict[str, Any]:
         """Get list of processed documents."""

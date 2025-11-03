@@ -143,10 +143,12 @@ class VectorStore:
         
         return query
 
-    def search(self, query: str, top_k: Optional[int] = None) -> List[Tuple[str, float, Dict]]:
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: Updated `search` to filter by `filename`
+    # -----------------------------------------------------------------
+    def search(self, query: str, top_k: Optional[int] = None, filename: Optional[str] = None) -> List[Tuple[str, float, Dict]]:
         """
-        Enhanced semantic search with better query processing.
-        FIXED: Corrected threshold logic and similarity calculation
+        Enhanced semantic search with L2 distance logic and metadata filtering by filename.
         """
         if not self.initialized:
             logger.error("Vector store not initialized")
@@ -160,54 +162,66 @@ class VectorStore:
             
             # Generate query embedding
             query_embedding = self.embedding_model.encode([processed_query])
-        
+
+            # -----------------------------------------------------------------
+            # 🚨 MODIFIED: Create metadata filter based on filename
+            # -----------------------------------------------------------------
+            filter_metadata = {}
+            if filename:
+                # We use the 'filename' field stored in the metadata
+                filter_metadata = {"filename": filename}
+                logger.info(f"Filtering search by filename: {filename}")
+            # -----------------------------------------------------------------
+
             # Search in ChromaDB
             results = self.collection.query(
                 query_embeddings=query_embedding.tolist(),
                 n_results=top_k * 2,  # Get more results for filtering
-                include=["documents", "metadatas", "distances"]
+                include=["documents", "metadatas", "distances"],
+                where=filter_metadata  # 🚨 Pass the filter here
             )
         
-            # 🚨 DEBUG: Check distance range to understand similarity calculation
             if results['distances'] and results['distances'][0]:
                 distances = results['distances'][0]
                 logger.debug(f"Distance range: min={min(distances):.3f}, max={max(distances):.3f}")
         
             # Process results
             search_results = []
+            
+            NORMAL_DISTANCE_THRESHOLD = 1.0  # Good L2 distance
+            FALLBACK_DISTANCE_THRESHOLD = 1.5 # Looser L2 distance
+
             if results['documents'] and results['documents'][0]:
                 for i, (doc, metadata, distance) in enumerate(zip(
                     results['documents'][0],
                     results['metadatas'][0],
                     results['distances'][0]
                 )):
-                    # 🚨 FIXED: Better similarity calculation for cosine distance
-                    # ChromaDB typically uses cosine distance (0-2 range)
-                    # similarity = 1 means identical, 0 means orthogonal
-                    similarity_score = 1.0 - distance
-                
-                    # 🚨 FIXED: Use reasonable threshold for normal search
-                    if similarity_score >= 0.3:
+                    if distance <= NORMAL_DISTANCE_THRESHOLD:
+                        similarity_score = max(0.0, 1.0 - (distance / 2.0))
                         search_results.append((doc, similarity_score, metadata))
         
-            # 🚨 FIXED: Fallback with LOWER threshold (was backwards before)
+            # Fallback with HIGHER distance threshold
             if not search_results and results['documents'] and results['documents'][0]:
-                logger.info("🔄 No results with normal threshold, trying fallback...")
+                logger.info("🔄 No results with normal distance threshold, trying fallback...")
                 for i, (doc, metadata, distance) in enumerate(zip(
                     results['documents'][0],
                     results['metadatas'][0],
                     results['distances'][0]
                 )):
-                    similarity_score = 1.0 - distance
-                    if similarity_score >= 0.15:  # 🚨 LOWER threshold for fallback
+                    if distance <= FALLBACK_DISTANCE_THRESHOLD:
+                        similarity_score = max(0.0, 1.0 - (distance / 2.0))
                         search_results.append((doc, similarity_score, metadata))
-        
+
+            search_results.sort(key=lambda x: x[1], reverse=True)
+
             logger.info(f"🔍 Search found {len(search_results)} relevant chunks for: {query[:50]}...")
             return search_results[:top_k]  # Return only top_k
         
         except Exception as e:
             logger.error(f"❌ Search error: {str(e)}")
             return []
+    # -----------------------------------------------------------------
     
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get collection statistics for monitoring."""

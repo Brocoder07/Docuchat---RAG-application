@@ -182,6 +182,12 @@ class SidebarComponent:
             if result["success"] and result["data"]["documents"]:
                 documents = result["data"]["documents"]
                 
+                # -----------------------------------------------------------------
+                # 🚨 ADDED: Store document list in session state for the chat dropdown
+                # -----------------------------------------------------------------
+                st.session_state.document_list = documents
+                # -----------------------------------------------------------------
+                
                 for doc in documents:
                     with st.container():
                         col1, col2 = st.columns([3, 1])
@@ -196,6 +202,7 @@ class SidebarComponent:
                 
                 st.caption(f"Total: {len(documents)} documents")
             else:
+                st.session_state.document_list = [] # 🚨 Ensure it's an empty list
                 st.info("No documents processed yet. Upload a document to get started!")
         except Exception as e:
             logger.error(f"Error rendering document list: {str(e)}")
@@ -261,11 +268,18 @@ class SidebarComponent:
                 st.success("Chat history cleared!")
                 st.rerun()
 
+# -----------------------------------------------------------------
+# 🚨 MODIFIED: The entire `ChatAreaComponent` is updated for `filename`
+# -----------------------------------------------------------------
 class ChatAreaComponent:
     """Main chat area with message history and input."""
     
     def __init__(self):
-        self.processing_query = False  # 🚨 Track if query is in progress
+        self.processing_query = False
+        
+        # 🚨 Use `selected_filename` in session state
+        if 'selected_filename' not in st.session_state:
+            st.session_state.selected_filename = "All Documents"
 
     def render(self):
         """Render the main chat interface."""
@@ -280,7 +294,6 @@ class ChatAreaComponent:
     def _render_chat_history(self):
         """Render the chat message history with error handling."""
         try:
-            # 🚨 DEFENSIVE: Check if method exists and handle gracefully
             if not hasattr(state_manager, 'get_chat_history'):
                 st.warning("Chat history feature is temporarily unavailable.")
                 return
@@ -338,7 +351,6 @@ class ChatAreaComponent:
             if source_info.get('chunk_details'):
                 st.subheader("🔍 Relevant Sections")
                 
-                # Group chunks by document
                 chunks_by_doc = {}
                 for chunk in source_info['chunk_details']:
                     doc_name = chunk['document']
@@ -346,7 +358,6 @@ class ChatAreaComponent:
                         chunks_by_doc[doc_name] = []
                     chunks_by_doc[doc_name].append(chunk)
                 
-                # Display chunks by document
                 for doc_name, chunks in chunks_by_doc.items():
                     st.write(f"**📄 {doc_name}**")
                     
@@ -363,7 +374,7 @@ class ChatAreaComponent:
                         if i < len(chunks) - 1:
                             st.divider()
                     
-                    st.write("")  # Space between documents
+                    st.write("")
     
     def _get_confidence_color(self, confidence: str) -> str:
         """Get color indicator for confidence level."""
@@ -379,6 +390,34 @@ class ChatAreaComponent:
     
     def _render_chat_input(self):
         """Render chat input and handle queries."""
+        
+        # -----------------------------------------------------------------
+        # 🚨 MODIFIED: Simplified document selector to use names
+        # -----------------------------------------------------------------
+        
+        # Prepare document list for the selectbox
+        doc_list = st.session_state.get('document_list', [])
+        
+        # Get just the filenames
+        options_list = ["All Documents"] + [doc['filename'] for doc in doc_list]
+        
+        # Get default index
+        try:
+            default_index = options_list.index(st.session_state.selected_filename)
+        except ValueError:
+            default_index = 0 # Default to "All Documents"
+        
+        selected_doc_name = st.selectbox(
+            "Query a specific document (optional):",
+            options=options_list,
+            index=default_index,
+            key="doc_selector" # 🚨 We will read from this key
+        )
+        
+        # Update session state when selection changes
+        st.session_state.selected_filename = selected_doc_name
+        # -----------------------------------------------------------------
+
         # Check for pending questions from quick questions
         pending_question = st.session_state.pop('pending_question', None)
         
@@ -393,7 +432,6 @@ class ChatAreaComponent:
     
     def _process_question(self, question: str):
         """Process a question and display the response with duplicate prevention."""
-        # 🚨 CRITICAL: Prevent multiple simultaneous queries
         if self.processing_query:
             st.warning("⚠️ Please wait for the current query to complete...")
             return
@@ -405,16 +443,32 @@ class ChatAreaComponent:
             with st.chat_message("user"):
                 st.write(question)
             
+            # -----------------------------------------------------------------
+            # 🚨 MODIFIED: Get the selected filename from session state
+            # -----------------------------------------------------------------
+            selected_name = st.session_state.get('selected_filename', "All Documents")
+            
+            # Set to None if "All Documents" is selected
+            selected_file = None
+            if selected_name != "All Documents":
+                selected_file = selected_name
+            
+            if selected_file:
+                logger.info(f"Querying with filename filter: {selected_file}")
+            else:
+                logger.info("Querying all documents")
+            # -----------------------------------------------------------------
+            
             # Get and display assistant response
             with st.chat_message("assistant"):
                 with st.spinner("🤔 Analyzing documents and generating answer..."):
-                    result = api_client.query_documents(question)
+                    # 🚨 Pass the selected_file (filename or None)
+                    result = api_client.query_documents(question, filename=selected_file)
                 
                 if result["success"]:
                     data = result["data"]
                     st.write(data["answer"])
                     
-                    # Add to chat history with source info
                     state_manager.add_chat_message(
                         question=question,
                         answer=data["answer"],
@@ -422,7 +476,6 @@ class ChatAreaComponent:
                         source_info=data.get("source_info", {})
                     )
                     
-                    # Show source information
                     if data.get("source_info"):
                         self._render_source_information(
                             data["source_info"], 
@@ -434,7 +487,7 @@ class ChatAreaComponent:
             logger.error(f"Error processing question: {str(e)}")
             st.error(f"An error occurred while processing your question: {str(e)}")
         finally:
-            self.processing_query = False  # 🚨 Reset processing flag
+            self.processing_query = False
 
 class SystemStatusComponent:
     """Comprehensive system status dashboard."""

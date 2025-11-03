@@ -60,6 +60,9 @@ async def health_check():
             ).dict()
         )
 
+# -----------------------------------------------------------------
+# 🚨 MODIFIED: Updated `query_documents` to pass the `filename`
+# -----------------------------------------------------------------
 @router.post(
     "/query",
     response_model=QueryResponse,
@@ -82,8 +85,16 @@ async def query_documents(request: QueryRequest):
                 ).dict()
             )
         
-        # Process query
-        result = rag_pipeline.query(request.question, top_k=request.top_k)
+        # -----------------------------------------------------------------
+        # 🚨 MODIFIED: Pass filename to the pipeline
+        # -----------------------------------------------------------------
+        result = rag_pipeline.query(
+            request.question, 
+            top_k=request.top_k, 
+            filename=request.filename  # 🚨 Use filename here
+        )
+        # -----------------------------------------------------------------
+        
         processing_time = time.time() - start_time
         
         if not result["success"]:
@@ -96,7 +107,6 @@ async def query_documents(request: QueryRequest):
                 ).dict()
             )
         
-        # 🚨 CRITICAL FIX: Ensure source_info is always present
         source_info = result.get("source_info")
         if not source_info:
             source_info = {
@@ -136,6 +146,7 @@ async def query_documents(request: QueryRequest):
                 timestamp=datetime.now().isoformat()  # 🚨 Use ISO string
             ).dict()
         )
+# -----------------------------------------------------------------
 
 @router.post(
     "/upload",
@@ -230,7 +241,7 @@ async def upload_document(file: UploadFile = File(...)):
         )
     finally:
         # 🚨 CRITICAL: Clean up temp file in finally block
-        if temp_path and os.path.exists(temp_path):
+        if 'temp_path' in locals() and temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
                 logger.debug(f"Cleaned up temp file: {temp_path}")

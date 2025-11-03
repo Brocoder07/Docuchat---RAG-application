@@ -35,6 +35,12 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=1000, description="User question")
     top_k: Optional[int] = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
     
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: Changed field from `document_id` to `filename`
+    # -----------------------------------------------------------------
+    filename: Optional[str] = Field(None, description="Filename of a specific document to query")
+    # -----------------------------------------------------------------
+    
     @validator('question')
     def validate_question(cls, v):
         # Remove excessive whitespace

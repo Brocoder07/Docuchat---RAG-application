@@ -32,7 +32,12 @@ async def lifespan(app: FastAPI):
         with ThreadPoolExecutor() as executor:
             future = executor.submit(rag_pipeline.initialize)
             try:
-                initialized = future.result(timeout=30)  # 30 second timeout
+                # -----------------------------------------------------------------
+                # 🚨 FIXED: Increased timeout to 90s for larger embedding model
+                # -----------------------------------------------------------------
+                initialized = future.result(timeout=90)  # 90 second timeout
+                # -----------------------------------------------------------------
+                
                 if initialized:
                     logger.info("✅ RAG Pipeline initialized successfully")
                 else:

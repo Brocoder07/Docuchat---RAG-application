@@ -39,9 +39,13 @@ class RAGConfig:
     TOP_K_RETRIEVAL: int = 5
     SIMILARITY_THRESHOLD: float = 0.3
     
-    # Embedding model
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # -----------------------------------------------------------------
+    # 🚨 FIXED: Upgraded embedding model for better retrieval quality
+    # -----------------------------------------------------------------
+    EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     EMBEDDING_DEVICE: str = "cpu"
+    # -----------------------------------------------------------------
+
 
 @dataclass
 class APIConfig:
