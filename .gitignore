@@ -110,6 +110,7 @@ data/uploads/*
 data/vector_store/*
 !data/uploads/.gitkeep
 !data/vector_store/.gitkeep
+serviceAccountKey.json
 
 # Log files
 *.log

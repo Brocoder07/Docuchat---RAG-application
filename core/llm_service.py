@@ -1,9 +1,9 @@
 """
-Final working Groq service with an intelligent Query Router.
+Final working Groq service with an intelligent Query Router and Conversation Memory.
 """
 import logging
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from core.config import config
 
 logger = logging.getLogger(__name__)
@@ -14,9 +14,6 @@ class GroqLLMService:
         self.current_model = "llama-3.1-8b-instant"  # Updated model
         self.base_url = "https://api.groq.com/openai/v1"
         
-        # -----------------------------------------------------------------
-        # 🚨 FIXED: Upgraded router prompt for robustness
-        # -----------------------------------------------------------------
         self.query_router_prompt = """You are an expert query classifier. Your task is to classify a user's question into one of two categories based on its *intent*: 'general' or 'specific'.
 
 - 'general': For broad, open-ended, or conceptual questions. These queries ask for summaries, explanations, or main points.
@@ -40,9 +37,12 @@ QUESTION:
 {question}
 
 CATEGORY:"""
-        # -----------------------------------------------------------------
         
+        # -----------------------------------------------------------------
+        # 🚨 MODIFIED: Updated prompt to include a {chat_history} block
+        # -----------------------------------------------------------------
         self.rag_prompt = """You are an expert Q&A assistant. Your task is to answer the user's question based on the provided context.
+Use the conversation history to understand follow-up questions.
 
 IMPORTANT RULES:
 1. You must ground your answer in the information found in the context.
@@ -51,6 +51,9 @@ IMPORTANT RULES:
 4. If the context does not contain relevant information to answer the question, and only in that case, say "I could not find any relevant information in the document."
 5. Do not add any information that is not present in the context.
 
+CHAT HISTORY:
+{chat_history}
+
 CONTEXT:
 {context}
 
@@ -58,6 +61,7 @@ QUESTION:
 {question}
 
 ANSWER:"""
+        # -----------------------------------------------------------------
         
         self.direct_prompt = """{question}
 
@@ -73,6 +77,7 @@ QUESTION:
 PASSAGE:"""
     
     def initialize(self) -> bool:
+        # ... (keep this method as is) ...
         if not config.model.GROQ_API_KEY:
             logger.error("❌ GROQ_API_KEY not found in .env file")
             return False
@@ -111,7 +116,7 @@ PASSAGE:"""
             return False
             
     def route_query(self, question: str) -> str:
-        """Classify the query as 'general' or 'specific'."""
+        # ... (keep this method as is) ...
         if not self.initialized:
             logger.warning("Router not initialized, defaulting to 'specific'")
             return "specific"
@@ -156,7 +161,7 @@ PASSAGE:"""
             return "specific"
 
     def generate_hypothetical_query(self, question: str) -> Dict[str, Any]:
-        """Generate a hypothetical document for a query."""
+        # ... (keep this method as is) ...
         if not self.initialized:
             return {
                 "success": False, 
@@ -212,7 +217,10 @@ PASSAGE:"""
                 "error": error_msg
             }
     
-    def generate_answer(self, question: str, context: Optional[str] = None) -> Dict[str, Any]:
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: `generate_answer` now accepts and formats chat_history
+    # -----------------------------------------------------------------
+    def generate_answer(self, question: str, context: Optional[str] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         if not self.initialized:
             return {
                 "success": False, 
@@ -223,7 +231,15 @@ PASSAGE:"""
         try:
             # Build the prompt
             if context:
-                prompt = self.rag_prompt.format(context=context, question=question)
+                # Format chat history
+                history_str = "No history provided."
+                if chat_history:
+                    history_str = ""
+                    for msg in chat_history:
+                        # Use keys that match frontend state manager
+                        history_str += f"Human: {msg['question']}\nAssistant: {msg['answer']}\n"
+                
+                prompt = self.rag_prompt.format(chat_history=history_str, context=context, question=question)
             else:
                 prompt = self.direct_prompt.format(question=question)
             

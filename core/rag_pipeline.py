@@ -1,10 +1,11 @@
 """
-Main RAG pipeline orchestrator - Upgraded with Intelligent Query Router.
+Main RAG pipeline orchestrator - Upgraded with Security (Firebase UID as str).
+FIXED: get_status user_id is now Optional.
 """
 import logging
 import uuid
 import os
-import re  # 🚨 Import regex
+import re
 from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime
 
@@ -16,14 +17,13 @@ from core.document_processor import document_processor
 logger = logging.getLogger(__name__)
 
 class RAGPipeline:
-    """Production RAG pipeline with monitoring and error handling."""
     
     def __init__(self):
+        # ... (this method is unchanged) ...
         self.initialized = False
-        self.processed_documents = []
+        self.processed_documents = [] 
         self.query_history = []
         
-        # 🚨 FIX: Initialize components immediately
         from core.vector_store import vector_store
         from core.llm_service import llm_service
         
@@ -31,16 +31,14 @@ class RAGPipeline:
         self.llm_service = llm_service
     
     def initialize(self) -> bool:
-        """Initialize all components with proper error handling."""
+        # ... (this method is unchanged) ...
         try:
             logger.info("🚀 Initializing RAG Pipeline...")
             
-            # Initialize vector store first (foundation)
             if not self.vector_store.initialize():
                 logger.error("❌ Failed to initialize vector store")
                 return False
             
-            # Initialize LLM service (core intelligence)
             if not self.llm_service.initialize():
                 logger.error("❌ Failed to initialize LLM service")
                 return False
@@ -54,15 +52,8 @@ class RAGPipeline:
             self.initialized = False
             return False
     
-    # -----------------------------------------------------------------
-    # 🚨 ADDED: New helper method to clean queries
-    # -----------------------------------------------------------------
     def _clean_query_for_routing(self, question: str) -> str:
-        """
-        Removes constraints (e.g., "in 100 words") from a query
-        to improve routing and HyDE generation.
-        """
-        # Regex to find common constraints
+        # ... (this method is unchanged) ...
         constraint_patterns = [
             r"in \d+-\d+ words",
             r"in \d+ words",
@@ -75,17 +66,15 @@ class RAGPipeline:
         for pattern in constraint_patterns:
             cleaned_question = re.sub(pattern, "", cleaned_question, flags=re.IGNORECASE).strip()
         
-        # Remove any trailing "in" or "list"
         cleaned_question = re.sub(r"\b(in|list)$", "", cleaned_question, flags=re.IGNORECASE).strip()
         
         if cleaned_question != question:
             logger.info(f"Original query for routing: '{question}' -> Cleaned: '{cleaned_question}'")
         
         return cleaned_question
-    # -----------------------------------------------------------------
     
     def _build_empty_source_info(self) -> Dict[str, Any]:
-        """Build empty source information."""
+        # ... (this method is unchanged) ...
         return {
             "total_sources": 0,
             "documents": [],
@@ -95,19 +84,19 @@ class RAGPipeline:
         }
     
     def _build_context(self, relevant_chunks: List[Tuple]) -> str:
-        """Build clean context from relevant chunks."""
+        # ... (this method is unchanged) ...
         context_parts = []
         
         for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
             source = metadata.get('source', 'Unknown')
             context_parts.append(f"[Source: {source} | Relevance: {score:.2f}]")
             context_parts.append(chunk_text)
-            context_parts.append("")  # Empty line between chunks
+            context_parts.append("")
         
         return "\n".join(context_parts)
     
     def _prepare_source_info(self, relevant_chunks: List[Tuple]) -> Dict[str, Any]:
-        """Prepare structured source information."""
+        # ... (this method is unchanged) ...
         if not relevant_chunks:
             return {
                 "total_sources": 0,
@@ -116,7 +105,6 @@ class RAGPipeline:
                 "chunk_details": []
             }
         
-        # Extract unique documents
         documents = set()
         chunk_details = []
         
@@ -131,7 +119,6 @@ class RAGPipeline:
                 'chunk_id': metadata.get('chunk_id', f'chunk_{i+1}')
             })
         
-        # Determine primary source (document with highest total confidence)
         source_scores = {}
         for chunk in relevant_chunks:
             doc_name = chunk[2].get('source', 'Unknown Document')
@@ -149,71 +136,39 @@ class RAGPipeline:
         }
 
     
-    def process_document(self, file_path: str, filename: str) -> Dict[str, Any]:
-        """
-        Process document end-to-end with progress tracking.
-        Senior Engineer Principle: Clear input/output contracts.
-        """
+    def process_document(self, file_path: str, filename: str, user_id: str) -> Dict[str, Any]:
+        # ... (this method is unchanged) ...
         if not self.initialized:
-            return {
-                "success": False,
-                "error": "Pipeline not initialized",
-                "document_id": None
-            }
+            return {"success": False, "error": "Pipeline not initialized", "document_id": None}
         
         try:
-            # Generate unique document ID
             document_id = str(uuid.uuid4())
-            logger.info(f"📦 Processing document: {filename} (ID: {document_id})")
+            logger.info(f"📦 Processing document: {filename} (ID: {document_id}) for user {user_id}")
             
-            # Step 1: Extract and chunk text
             processing_result = document_processor.process_file(file_path, filename)
             if not processing_result["success"]:
-                return {
-                    "success": False,
-                    "error": processing_result["error"],
-                    "document_id": document_id
-                }
+                return {**processing_result, "document_id": document_id}
             
             chunks = processing_result["chunks"]
             if not chunks:
-                return {
-                    "success": False,
-                    "error": "No chunks generated from document",
-                    "document_id": document_id
-                }
+                return {"success": False, "error": "No chunks generated from document", "document_id": document_id}
             
-            # Step 2: Prepare metadata for vector store
             metadata_list = []
             for i, chunk in enumerate(chunks):
                 metadata_list.append({
                     "source": filename,
-                    "filename": filename,  # 🚨 Ensure 'filename' is saved
+                    "filename": filename,
                     "document_id": document_id,
+                    "user_id": user_id,
                     "chunk_index": i,
                     "total_chunks": len(chunks),
                     "processed_at": datetime.now().isoformat()
                 })
             
-            # Step 3: Store in vector database
-            if not vector_store.add_documents(chunks, metadata_list, document_id):
-                return {
-                    "success": False,
-                    "error": "Failed to store document in vector database",
-                    "document_id": document_id
-                }
+            if not self.vector_store.add_documents(chunks, metadata_list, document_id):
+                return {"success": False, "error": "Failed to store document in vector database", "document_id": document_id}
             
-            # Step 4: Track processed document
-            document_info = {
-                "document_id": document_id,
-                "filename": filename,
-                "file_path": file_path,
-                "chunks_count": len(chunks),
-                "processed_at": datetime.now().isoformat()
-            }
-            self.processed_documents.append(document_info)
-            
-            logger.info(f"✅ Document processed successfully: {filename} ({len(chunks)} chunks)")
+            logger.info(f"✅ Document processed successfully: {filename} ({len(chunks)} chunks) for user {user_id}")
             
             return {
                 "success": True,
@@ -224,100 +179,50 @@ class RAGPipeline:
             
         except Exception as e:
             logger.error(f"❌ Document processing failed: {str(e)}")
-            return {
-                "success": False,
-                "error": f"Processing error: {str(e)}",
-                "document_id": None
-            }
+            return {"success": False, "error": f"Processing error: {str(e)}", "document_id": None}
     
-    # -----------------------------------------------------------------
-    # 🚨 MODIFIED: Updated `query` to use the cleaner + router
-    # -----------------------------------------------------------------
-    def query(self, question: str, top_k: Optional[int] = None, filename: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Query documents using an intelligent router for specific vs. general queries.
-        """
+    def query(self, question: str, user_id: str, top_k: Optional[int] = None, filename: Optional[str] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+        # ... (this method is unchanged) ...
         if not self.initialized:
-            return {
-                "success": False,
-                "answer": "Pipeline not initialized. Please check system status.",
-                "sources": [],
-                "source_info": self._build_empty_source_info(),
-                "error": "Pipeline not initialized"
-            }
+            return {"success": False, "answer": "Pipeline not initialized...", "sources": [], "source_info": self._build_empty_source_info(), "error": "Pipeline not initialized"}
     
         try:
-            logger.info(f"🔍 Processing query: {question}")
+            logger.info(f"🔍 Processing query for user {user_id}: {question}")
             
-            # -----------------------------------------------------------------
-            # 🚨 MODIFIED: Step 1 - Clean query and then route it
-            # -----------------------------------------------------------------
-            
-            # Clean the query for routing and HyDE
             cleaned_question = self._clean_query_for_routing(question)
-            
-            # Route the cleaned query
             query_type = llm_service.route_query(cleaned_question)
             
             if query_type == "general":
                 logger.info("🔄 Query is 'general'. Rewriting with HyDE...")
-                # Use the cleaned question for HyDE
                 hyde_result = llm_service.generate_hypothetical_query(cleaned_question)
                 search_query = hyde_result["query"]
                 
-                if hyde_result["success"]:
-                    logger.info(f"✅ HyDE query: {search_query[:80]}...")
-                else:
-                    logger.warning(f"⚠️ HyDE failed, falling back to original query. Error: {hyde_result['error']}")
-                    search_query = cleaned_question # Fallback
+                if not hyde_result["success"]:
+                    logger.warning(f"⚠️ HyDE failed, falling back... Error: {hyde_result['error']}")
+                    search_query = cleaned_question
             else:
                 logger.info("✅ Query is 'specific'. Using original query for search.")
-                search_query = question # Use the ORIGINAL, uncleanead query for specific search
-            # -----------------------------------------------------------------
+                search_query = question
             
-            # Step 2: Retrieve relevant chunks (using the determined search_query)
-            relevant_chunks = vector_store.search(
+            relevant_chunks = self.vector_store.search(
                 search_query, 
+                user_id=user_id,
                 top_k=top_k, 
                 filename=filename
             )
         
             if not relevant_chunks:
-                logger.info(f"❌ No relevant content found for: {question}")
-                return {
-                    "success": True,
-                    "answer": "I couldn't find any relevant information in the documents to answer your question.",
-                    "sources": [],
-                    "source_info": self._build_empty_source_info(),
-                    "confidence": "very low",
-                    "chunks_retrieved": 0,
-                    "model_used": "none"
-                }
+                logger.info(f"❌ No relevant content found for user {user_id}: {question}")
+                return {"success": True, "answer": "I couldn't find any relevant information...", "sources": [], "source_info": self._build_empty_source_info(), "confidence": "very low", "chunks_retrieved": 0, "model_used": "none"}
         
-            # Step 3: Build context from relevant chunks
             context = self._build_context(relevant_chunks)
-        
-            # Step 4: Generate answer using LLM
-            # 🚨 IMPORTANT: Use the ORIGINAL question here so the LLM can see
-            # the constraints (e.g., "in 120-150 words")
-            llm_result = llm_service.generate_answer(question, context)
+            llm_result = llm_service.generate_answer(question, context, chat_history)
         
             if not llm_result["success"]:
-                return {
-                    "success": False,
-                    "answer": "I encountered an error while generating the answer.",
-                    "sources": [],
-                    "source_info": self._build_empty_source_info(),
-                    "error": llm_result.get("error", "LLM error")
-                }
+                return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": llm_result.get("error", "LLM error")}
         
-            # Step 5: Prepare source information
             source_info = self._prepare_source_info(relevant_chunks)
-        
-            # Step 6: Calculate confidence
             confidence = self._calculate_confidence(relevant_chunks, llm_result["answer"])
-        
-            # Step 7: Track query for analytics
             self._track_query(question, llm_result["answer"], len(relevant_chunks))
         
             logger.info(f"✅ Query processed successfully: {len(relevant_chunks)} chunks used")
@@ -334,27 +239,17 @@ class RAGPipeline:
         
         except Exception as e:
             logger.error(f"❌ Query processing failed: {str(e)}")
-            return {
-                "success": False,
-                "answer": "I encountered an error while processing your query.",
-                "sources": [],
-                "source_info": self._build_empty_source_info(),
-                "error": str(e)
-            }
+            return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": str(e)}
 
     
     def _calculate_confidence(self, relevant_chunks: List[Tuple], answer: str) -> str:
-        """Calculate answer confidence based on multiple factors."""
+        # ... (this method is unchanged) ...
         if not relevant_chunks:
             return "very low"
         
-        # Factor 1: Average similarity score of retrieved chunks
         avg_similarity = sum(score for _, score, _ in relevant_chunks) / len(relevant_chunks)
-        
-        # Factor 2: Answer length (very short answers might be low confidence)
         answer_length_factor = min(1.0, len(answer) / 100)
         
-        # Factor 3: Presence of uncertainty phrases
         uncertainty_phrases = ['cannot find', 'not provided', 'unable to', 'no information']
         uncertainty_penalty = 0.0
         for phrase in uncertainty_phrases:
@@ -362,10 +257,8 @@ class RAGPipeline:
                 uncertainty_penalty = 0.3
                 break
         
-        # Combined confidence score
         combined_confidence = (avg_similarity * 0.7) + (answer_length_factor * 0.3) - uncertainty_penalty
         
-        # Map to confidence levels
         if combined_confidence > 0.8:
             return "very high"
         elif combined_confidence > 0.65:
@@ -378,7 +271,7 @@ class RAGPipeline:
             return "very low"
     
     def _track_query(self, question: str, answer: str, chunks_used: int):
-        """Track query for analytics and monitoring with size limits."""
+        # ... (this method is unchanged) ...
         query_record = {
             "question": question,
             "answer_preview": answer[:100] + "..." if len(answer) > 100 else answer,
@@ -387,50 +280,55 @@ class RAGPipeline:
         }
         self.query_history.append(query_record)
         
-        # 🚨 FIX: Keep only last 50 queries to prevent memory issues
         if len(self.query_history) > 50:
             self.query_history = self.query_history[-50:]
     
-    def get_status(self) -> Dict[str, Any]:
-        """Get comprehensive pipeline status."""
-        vector_stats = vector_store.get_collection_stats()
-        llm_status = llm_service.get_status()
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: `get_status` now accepts `Optional[str]`
+    # -----------------------------------------------------------------
+    def get_status(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """Get comprehensive pipeline status (global or user-specific)."""
         
+        llm_status = self.llm_service.get_status()
+        
+        # Get stats (user-specific or global)
+        vector_stats = self.vector_store.get_collection_stats(user_id=user_id)
+        
+        docs_processed = 0
+        if user_id:
+            user_docs = self.list_documents(user_id=user_id)
+            docs_processed = len(user_docs)
+        elif vector_stats:
+             # For public health check, report global doc count
+            docs_processed = vector_stats.get("unique_documents", 0)
+
         return {
             "initialized": self.initialized,
-            "documents_processed": len(self.processed_documents),
-            "total_queries": len(self.query_history),
+            "documents_processed": docs_processed,
+            "total_queries": len(self.query_history), # (This is global)
             "vector_store": vector_stats,
             "llm_service": llm_status,
             "timestamp": datetime.now().isoformat()
         }
     
-    def list_documents(self) -> List[Dict[str, Any]]:
-        """List all processed documents."""
-        return self.processed_documents.copy()
+    def list_documents(self, user_id: str) -> List[Dict[str, Any]]:
+        # ... (this method is unchanged) ...
+        return self.vector_store.list_documents_by_user(user_id=user_id)
     
-    def delete_document(self, document_id: str) -> bool:
-        """Delete a document from the pipeline."""
+    def delete_document(self, document_id: str, user_id: str) -> bool:
+        # ... (this method is unchanged) ...
         try:
-            # Remove from vector store
-            success = vector_store.delete_document(document_id)
+            doc_metadata = self.vector_store.get_document_metadata(document_id, user_id)
+            if not doc_metadata:
+                logger.warning(f"User {user_id} tried to delete non-existent or un-owned doc {document_id}")
+                return False
             
-            if success:
-                # Remove from processed documents
-                self.processed_documents = [
-                    doc for doc in self.processed_documents 
-                    if doc.get('document_id') != document_id
-                ]
-                logger.info(f"✅ Document {document_id} deleted successfully")
-            else:
-                logger.warning(f"Document {document_id} not found in vector store")
-            
+            success = self.vector_store.delete_document(document_id, user_id)
             return success
             
         except Exception as e:
             logger.error(f"Error deleting document {document_id}: {str(e)}")
             return False
 
-    
 # Global pipeline instance
 rag_pipeline = RAGPipeline()

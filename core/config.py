@@ -1,28 +1,38 @@
 """
-Unified configuration with environment-aware settings.
-Senior Engineer Principle: Single source of truth for all configurations.
+Unified configuration with Firebase Auth.
+FIXED: Added missing comma in FIREBASE_WEB_CONFIG.
 """
 import os
-from dataclasses import dataclass
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict
 import logging
 from dotenv import load_dotenv
+import json
 
 logger = logging.getLogger(__name__)
-# Load environment variables from .env file
 load_dotenv()
+
+@dataclass
+class FirebaseConfig:
+    """Firebase configuration."""
+    SERVICE_ACCOUNT_KEY_PATH: str = "serviceAccountKey.json"
+    
+    FIREBASE_WEB_CONFIG: Dict = field(default_factory=lambda: {
+        "apiKey": "AIzaSyB9mD1Fxn1uWkB48kuizzvfjOX7ZoEPHjc",
+        "authDomain": "docuchat---rag-app.firebaseapp.com",
+        "projectId": "docuchat---rag-app",
+        "storageBucket": "docuchat---rag-app.firebasestorage.app",
+        "messagingSenderId": "674144836261",
+        "appId": "1:674144836261:web:cfddb520431bebcefb0b4c",
+        "measurementId": "G-XDKPD7G3MS",
+        "databaseURL": "https://docuchat---rag-app-default-rtdb.firebaseio.com/"
+    })
 
 @dataclass
 class ModelConfig:
     """Groq model configuration."""
-    
-    # Groq API configuration
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    
-    # Single model to use
-    MODEL: str = "llama-3.1-8b-instant"  # NEW - CURRENT MODEL
-    
-    # Model parameters
+    MODEL: str = "llama-3.1-8b-instant"
     TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 1024
     TOP_P: float = 0.9
@@ -38,14 +48,8 @@ class RAGConfig:
     CHUNK_OVERLAP: int = 200
     TOP_K_RETRIEVAL: int = 5
     SIMILARITY_THRESHOLD: float = 0.3
-    
-    # -----------------------------------------------------------------
-    # 🚨 FIXED: Upgraded embedding model for better retrieval quality
-    # -----------------------------------------------------------------
     EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     EMBEDDING_DEVICE: str = "cpu"
-    # -----------------------------------------------------------------
-
 
 @dataclass
 class APIConfig:
@@ -53,8 +57,6 @@ class APIConfig:
     HOST: str = os.getenv("API_HOST", "127.0.0.1")
     PORT: int = int(os.getenv("API_PORT", "8000"))
     RELOAD: bool = os.getenv("API_RELOAD", "true").lower() == "true"
-    
-    # CORS
     ALLOW_ORIGINS: List[str] = None
     
     def __post_init__(self):
@@ -71,8 +73,6 @@ class FileConfig:
     def __post_init__(self):
         if self.ALLOWED_EXTENSIONS is None:
             self.ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.md']
-        
-        # Create upload directory
         os.makedirs(self.UPLOAD_DIR, exist_ok=True)
 
 @dataclass
@@ -107,16 +107,14 @@ class Config:
     
     def _initialize(self):
         """Initialize all configuration sections."""
+        self.firebase = FirebaseConfig()
         self.model = ModelConfig()
         self.rag = RAGConfig()
         self.api = APIConfig()
         self.files = FileConfig()
         self.logging = LoggingConfig()
         
-        # Setup logging immediately
         self.logging.setup_logging()
-        
-        # Validate critical configurations
         self._validate_config()
     
     def _validate_config(self):
@@ -127,6 +125,14 @@ class Config:
         if self.rag.CHUNK_SIZE <= self.rag.CHUNK_OVERLAP:
             raise ValueError("Chunk size must be greater than chunk overlap")
         
+        if not os.path.exists(self.firebase.SERVICE_ACCOUNT_KEY_PATH):
+            raise FileNotFoundError(f"Firebase service account key not found at: {self.firebase.SERVICE_ACCOUNT_KEY_PATH}")
+        
+        # 🚨 Note: I'm keeping this warning. Your API key is visible in your config.
+        # You should rotate this key and load it from a .env file.
+        if "AIzaSy" in self.firebase.FIREBASE_WEB_CONFIG["apiKey"]:
+            logger.warning("🚨 Firebase web config seems to be using placeholder values or a hardcoded key.")
+            
         logging.info("✅ Configuration validated and loaded successfully")
 
 # Global config instance

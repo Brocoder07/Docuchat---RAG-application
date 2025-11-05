@@ -1,5 +1,6 @@
 """
-Main Streamlit application with production-grade error handling and initialization.
+Main Streamlit application with full Firebase authentication routing.
+FIXED: Initialized st.session_state.selected_filename.
 """
 import streamlit as st
 import logging
@@ -10,12 +11,11 @@ from datetime import datetime
 
 # CRITICAL FIX: Robust path resolution
 try:
-    # Multiple path resolution strategies
     possible_paths = [
-        os.path.dirname(os.path.abspath(__file__)),  # Current file dir
-        os.getcwd(),  # Current working directory
-        os.path.join(os.getcwd(), 'frontend'),  # Subdirectory
-        os.path.dirname(os.getcwd()),  # Parent directory
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd(),
+        os.path.join(os.getcwd(), 'frontend'),
+        os.path.dirname(os.getcwd()),
     ]
     
     for path in possible_paths:
@@ -25,9 +25,9 @@ try:
     else:
         raise ImportError("Could not find project root directory")
     
-    # Now import core modules
     from frontend.components import component_factory
     from frontend.services import api_client, state_manager
+    from frontend.auth_components import auth_component_factory
     
 except ImportError as e:
     st.error(f"Import error: {e}")
@@ -43,9 +43,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class ApplicationInitializer:
-    """
-    Application initialization with proper error handling.
-    """
     
     def __init__(self):
         self.initialized = False
@@ -54,26 +51,38 @@ class ApplicationInitializer:
     def initialize(self) -> bool:
         """Initialize the application with comprehensive checks."""
         try:
-            # 🚨 CRITICAL: Prevent multiple initializations
             if hasattr(st.session_state, 'app_initialized') and st.session_state.app_initialized:
                 return True
                 
             logger.info("🚀 Initializing DocuChat Frontend...")
-            self.startup_time = datetime.now()  # 🚨 SET STARTUP TIME EARLY
+            self.startup_time = datetime.now()
             
-            # Configure Streamlit page
             self._configure_page()
             
-            # Initialize session state
+            # Initialize session state (basic keys)
             state_manager.initialize_session()
             
-            # 🚨 CRITICAL: Initialize session state for file tracking
-            if 'last_processed_file' not in st.session_state:
-                st.session_state.last_processed_file = None
+            # -----------------------------------------------------------------
+            # 🚨 MODIFIED: Initialize all session state variables here
+            # -----------------------------------------------------------------
             if 'app_initialized' not in st.session_state:
                 st.session_state.app_initialized = False
+            if 'id_token' not in st.session_state:
+                st.session_state.id_token = None
+            if 'user_email' not in st.session_state:
+                st.session_state.user_email = None
+            if 'auth_page' not in st.session_state:
+                st.session_state.auth_page = 'login'
+            if 'session_restored' not in st.session_state:
+                st.session_state.session_restored = False
             
-            # Check backend connectivity
+            # -----------------------------------------------------------------
+            # 🚨 FIXED: Add the missing variable initialization
+            # -----------------------------------------------------------------
+            if 'selected_filename' not in st.session_state:
+                st.session_state.selected_filename = "All Documents"
+            # -----------------------------------------------------------------
+
             if not self._check_backend_connectivity():
                 logger.error("Backend connectivity check failed")
                 return False
@@ -95,14 +104,14 @@ class ApplicationInitializer:
             layout="wide",
             initial_sidebar_state="expanded",
             menu_items={
-                'Get Help': 'https://github.com/yourusername/docuchat',
-                'Report a bug': 'https://github.com/yourusername/docuchat/issues',
+                'Get Help': 'https://github.com/brocoder07/docuchat---rag-application',
+                'Report a bug': 'https://github.com/brocoder07/docuchat---rag-application/issues',
                 'About': "DocuChat - AI-powered Document Q&A System"
             }
         )
     
     def _check_backend_connectivity(self) -> bool:
-        """Check backend API connectivity with retry logic."""
+        """Check backend API connectivity (public /health endpoint)."""
         max_retries = 8
         retry_delay = 3
         
@@ -127,11 +136,8 @@ class ApplicationInitializer:
         return False
 
 class ErrorHandler:
-    """Comprehensive error handling for the frontend."""
-    
     @staticmethod
     def render_error_page(error_message: str, error_details: str = None):
-        """Render a user-friendly error page."""
         st.error("🚨 Application Error")
         
         st.markdown(f"""
@@ -153,7 +159,6 @@ class ErrorHandler:
         ```
         """)
         
-        # Show technical details in expander for debugging
         with st.expander("Technical Details (for debugging)"):
             st.code(f"""
             Error: {error_message}
@@ -165,7 +170,6 @@ class ErrorHandler:
     
     @staticmethod
     def render_backend_unavailable():
-        """Render backend unavailable message."""
         st.error("🔌 Backend Unavailable")
         
         st.markdown("""
@@ -178,7 +182,7 @@ class ErrorHandler:
         1. **Start the backend server** (in a separate terminal):
         ```bash
         # Navigate to project root
-        cd DocuChat
+        cd docuchat---rag-application
         
         # Start the backend API
         python -m api.main
@@ -188,7 +192,7 @@ class ErrorHandler:
            ```
            🚀 Starting DocuChat API...
            ✅ RAG Pipeline initialized successfully
-           INFO:     Uvicorn running on http://127.0.0.1:8000
+           INFO:     Uvicorn running on [http://127.0.0.1:8000](http://127.0.0.1:8000)
            ```
         
         3. **Refresh this page** once the backend is running
@@ -200,33 +204,33 @@ class ErrorHandler:
         - Ensure you're in the correct Python environment
         """)
         
-        # Auto-refresh button
         if st.button("🔄 Check Again"):
             st.experimental_rerun()
 
 def main():
     """
-    Main application entry point with comprehensive error handling.
+    Main application entry point with authentication routing.
     """
     try:
-        # Initialize application
         initializer = ApplicationInitializer()
         
         if not initializer.initialize():
             ErrorHandler.render_backend_unavailable()
             return
         
-        # Check backend health on each run
-        if not api_client.check_health():
-            ErrorHandler.render_backend_unavailable()
-            return
+        component_factory.components['styler'].apply_custom_styles()
         
-        # Render the main application
-        component_factory.render_all()
+        # Try to restore the session from browser storage if it's not in st.session_state
+        if not st.session_state.id_token and not st.session_state.session_restored:
+            auth_component_factory.try_restore_session()
         
-        # Render footer with version info - 🚨 SAFE: startup_time is now guaranteed
-        _render_footer(initializer.startup_time)
-        
+        # Now, check for the token again
+        if not st.session_state.id_token:
+            auth_component_factory.render_auth_page()
+        else:
+            component_factory.render_all()
+            _render_footer(initializer.startup_time)
+
     except Exception as e:
         logger.error(f"🚨 Critical application error: {str(e)}", exc_info=True)
         ErrorHandler.render_error_page(
@@ -235,13 +239,11 @@ def main():
         )
 
 def _render_footer(startup_time):
-    """Render application footer with useful information."""
     st.divider()
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        # 🚨 DEFENSIVE: Check if startup_time exists before using strftime
         if startup_time:
             st.caption(f"🕒 Started: {startup_time.strftime('%Y-%m-%d %H:%M:%S')}")
         else:
@@ -253,15 +255,16 @@ def _render_footer(startup_time):
     with col3:
         st.caption("💡 DocuChat v2.0.0")
     
-    # Debug information (hidden by default)
     with st.expander("🔍 Debug Information"):
         st.write("**Session State:**")
-        # Filter out large objects from display
         safe_session_state = {}
         for k, v in st.session_state.items():
             if k != 'file_uploader' and not callable(v):
                 if isinstance(v, (str, int, float, bool, type(None))):
-                    safe_session_state[k] = v
+                    if k == 'id_token' and v is not None:
+                        safe_session_state[k] = f"firebase_id_token_******"
+                    else:
+                        safe_session_state[k] = v
                 else:
                     safe_session_state[k] = f"<{type(v).__name__} object>"
         

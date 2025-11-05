@@ -1,6 +1,6 @@
 """
 FastAPI application with production-ready configuration.
-FIXED: Disabled auto-reload to prevent recursive file watching
+Now uses Firebase Admin for auth dependency.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -11,10 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from core.config import config
-from api.routes import router
+from api.routes import router as v1_router # 🚨 Renamed
+# 🚨 NO auth_router, NO database imports
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# 🚨 NOTE: No need to create DB tables here anymore
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,17 +35,11 @@ async def lifespan(app: FastAPI):
         with ThreadPoolExecutor() as executor:
             future = executor.submit(rag_pipeline.initialize)
             try:
-                # -----------------------------------------------------------------
-                # 🚨 FIXED: Increased timeout to 90s for larger embedding model
-                # -----------------------------------------------------------------
-                initialized = future.result(timeout=90)  # 90 second timeout
-                # -----------------------------------------------------------------
-                
+                initialized = future.result(timeout=90)
                 if initialized:
                     logger.info("✅ RAG Pipeline initialized successfully")
                 else:
                     logger.error("❌ RAG Pipeline initialization failed")
-                    # Don't crash, but log heavily
             except TimeoutError:
                 logger.error("❌ RAG Pipeline initialization timed out")
             except Exception as e:
@@ -68,7 +65,6 @@ def create_application() -> FastAPI:
         lifespan=lifespan
     )
     
-    # Add CORS middleware
     application.add_middleware(
         CORSMiddleware,
         allow_origins=config.api.ALLOW_ORIGINS,
@@ -77,15 +73,18 @@ def create_application() -> FastAPI:
         allow_headers=["*"],
     )
     
-    # Include routes
-    application.include_router(router, prefix="/api/v1")
+    # -----------------------------------------------------------------
+    # 🚨 MODIFIED: Only one router
+    # -----------------------------------------------------------------
+    application.include_router(v1_router, prefix="/api/v1", tags=["RAG Pipeline"])
+    # -----------------------------------------------------------------
     
     return application
 
 # Create application instance
 app = create_application()
 
-# Custom documentation endpoint
+# ... (keep /docs and / root endpoints) ...
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
     """Custom Swagger UI with better styling."""
@@ -95,7 +94,6 @@ async def custom_swagger_ui_html():
         swagger_favicon_url="https://fastapi.tiangolo.com/img/favicon.png"
     )
 
-# Root endpoint
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
@@ -107,14 +105,12 @@ async def root():
         "health": "/api/v1/health"
     }
 
-# Exception handlers (keep your existing ones)
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "api.main:app",
         host=config.api.HOST,
         port=config.api.PORT,
-        reload=False,  # 🚨 CRITICAL FIX: Disabled auto-reload
+        reload=False,
         log_level="info"
     )

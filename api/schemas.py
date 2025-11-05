@@ -1,11 +1,14 @@
 """
 API request/response schemas with comprehensive validation.
-Senior Engineer Principle: Strong typing prevents bugs and improves documentation.
+REMOVED: Local auth schemas.
+ADDED: Chat history to QueryRequest.
 """
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, EmailStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 import re
+
+# 🚨 NOTE: UserCreate, UserLogin, UserResponse, Token are GONE.
 
 class HealthResponse(BaseModel):
     """Health check response with system status."""
@@ -15,7 +18,7 @@ class HealthResponse(BaseModel):
     llm_ready: bool = Field(..., description="LLM service status")
     llm_model: str = Field(..., description="Active LLM model")
     vector_store_initialized: bool = Field(..., description="Vector store status")
-    timestamp: str = Field(..., description="Response timestamp")  # 🚨 Changed to str
+    timestamp: str = Field(..., description="Response timestamp")
     
     @validator('timestamp', pre=True, always=True)
     def convert_timestamp(cls, v):
@@ -34,12 +37,12 @@ class QueryRequest(BaseModel):
     """Query request with validation."""
     question: str = Field(..., min_length=1, max_length=1000, description="User question")
     top_k: Optional[int] = Field(5, ge=1, le=20, description="Number of chunks to retrieve")
+    filename: Optional[str] = Field(None, description="Filename of a specific document to query")
     
     # -----------------------------------------------------------------
-    # 🚨 MODIFIED: Changed field from `document_id` to `filename`
+    # 🚨 ADDED (BACK): Conversation Memory
     # -----------------------------------------------------------------
-    filename: Optional[str] = Field(None, description="Filename of a specific document to query")
-    # -----------------------------------------------------------------
+    chat_history: Optional[List[Dict[str, str]]] = Field(None, description="A list of previous 'question' and 'answer' dicts for memory")
     
     @validator('question')
     def validate_question(cls, v):
@@ -49,6 +52,7 @@ class QueryRequest(BaseModel):
             raise ValueError('Question must be at least 2 characters long')
         return v
 
+# ... (keep all other models: SourceChunk, SourceInfo, QueryResponse, etc.) ...
 class SourceChunk(BaseModel):
     """Individual source chunk information."""
     document: str = Field(..., description="Source document name")
@@ -98,7 +102,7 @@ class ErrorResponse(BaseModel):
     """Standardized error response."""
     detail: str = Field(..., description="Error description")
     error_type: Optional[str] = Field(None, description="Error category")
-    timestamp: str = Field(..., description="Error timestamp")  # 🚨 Changed to str
+    timestamp: str = Field(..., description="Error timestamp")
     
     @validator('timestamp', pre=True, always=True)
     def convert_timestamp(cls, v):

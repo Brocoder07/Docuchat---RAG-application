@@ -28,3 +28,7 @@ requests==2.31.0
 
 # Testing & Development
 pytest==7.4.4
+
+# Auth & Security
+firebase-admin==6.5.0
+pyrebase4==4.8.0
