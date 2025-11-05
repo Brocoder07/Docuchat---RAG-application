@@ -25,7 +25,7 @@ class APIClient:
         self.retry_delay = 2
     
     # -----------------------------------------------------------------
-    # 🚨 MODIFIED: `_make_request` now sends the Firebase ID token
+    # Modified: `_make_request` now sends the Firebase ID token
     # -----------------------------------------------------------------
     def _make_request(self, method: str, endpoint: str, timeout: Optional[int] = None, **kwargs) -> Dict[str, Any]:
         """
@@ -111,7 +111,7 @@ class APIClient:
         return {"success": False, "error": "Max retries exceeded"}
     
     # -----------------------------------------------------------------
-    # 🚨 NOTE: login, register, get_me are GONE.
+    # NOTE: login, register, get_me are GONE.
     # -----------------------------------------------------------------
     
     def check_health(self) -> bool:
@@ -128,11 +128,19 @@ class APIClient:
         return result.get("data") if result["success"] else None
     
     def upload_document(self, file_data: bytes, filename: str) -> Dict[str, Any]:
-        """Upload document with auth."""
+        """
+        Upload document with auth.
+
+        Two behaviors:
+         - If backend processes synchronously, frontend waits (timeout increased).
+         - Otherwise, backend will return immediately with a document_id and process in background.
+        """
         try:
             files = {"file": (filename, file_data)}
-            # user_id is in the token, no need to send it
-            return self._make_request("POST", "/upload", files=files)
+            # Use an increased timeout to allow synchronous processing if needed (5 minutes).
+            # If backend uses BackgroundTasks this will return quickly anyway.
+            upload_timeout = max(self.default_timeout, 300)
+            return self._make_request("POST", "/upload", files=files, timeout=upload_timeout)
         except Exception as e:
             logger.error(f"Upload error: {str(e)}")
             return {"success": False, "error": f"Upload failed: {str(e)}"}

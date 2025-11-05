@@ -1,21 +1,21 @@
 """
 Unified configuration with Firebase Auth.
-FIXED: All hardcoded secrets removed. Loading from environment variables.
+Made validation tolerant in dev; added ENV flags and admin list.
 """
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 import logging
 from dotenv import load_dotenv
-import json # 🚨 Import json
+import json
 
 logger = logging.getLogger(__name__)
-load_dotenv() 
+load_dotenv()
 
 @dataclass
 class FirebaseConfig:
     """Firebase configuration."""
-    SERVICE_ACCOUNT_KEY_PATH: str = "serviceAccountKey.json"
+    SERVICE_ACCOUNT_KEY_PATH: str = os.getenv("SERVICE_ACCOUNT_KEY_PATH", "serviceAccountKey.json")
 
     FIREBASE_WEB_CONFIG: Dict = field(default_factory=lambda:
         json.loads(os.getenv("FIREBASE_WEB_CONFIG_JSON", "{}"))
@@ -25,10 +25,10 @@ class FirebaseConfig:
 class ModelConfig:
     """Groq model configuration."""
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    MODEL: str = "llama-3.1-8b-instant"
-    TEMPERATURE: float = 0.3
-    MAX_TOKENS: int = 1024
-    TOP_P: float = 0.9
+    MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    TEMPERATURE: float = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
+    MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
+    TOP_P: float = float(os.getenv("GROQ_TOP_P", "0.9"))
 
     def __post_init__(self):
         if not self.GROQ_API_KEY:
@@ -37,12 +37,18 @@ class ModelConfig:
 @dataclass
 class RAGConfig:
     """RAG pipeline configuration."""
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    # Interpreted as tokens when using tokenizer-based chunker
+    CHUNK_SIZE: int = 500           # smaller chunk size for resumes
+    CHUNK_OVERLAP: int = 100       # overlap to preserve context
     TOP_K_RETRIEVAL: int = 5
     SIMILARITY_THRESHOLD: float = 0.3
     EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     EMBEDDING_DEVICE: str = "cpu"
+
+    def __post_init__(self):
+        if self.CHUNK_SIZE <= self.CHUNK_OVERLAP:
+            logger.warning("RAGConfig: CHUNK_SIZE <= CHUNK_OVERLAP; adjusting overlap")
+            self.CHUNK_OVERLAP = max(0, self.CHUNK_SIZE // 5)
 
 @dataclass
 class APIConfig:
@@ -60,11 +66,12 @@ class APIConfig:
 class FileConfig:
     """File processing configuration."""
     ALLOWED_EXTENSIONS: List[str] = None
-    MAX_FILE_SIZE_MB: int = 50
-    UPLOAD_DIR: str = "data/uploads"
+    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "data/uploads")
 
     def __post_init__(self):
         if self.ALLOWED_EXTENSIONS is None:
+            # streamlit wants extensions without leading dots sometimes; keep dots for backend checks.
             self.ALLOWED_EXTENSIONS = ['.pdf', '.txt', '.docx', '.md']
         os.makedirs(self.UPLOAD_DIR, exist_ok=True)
 
@@ -73,22 +80,31 @@ class LoggingConfig:
     """Logging configuration."""
     LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    LOG_DIR: str = os.getenv("LOG_DIR", "logs")
+    LOG_FILE: str = os.path.join(os.getenv("LOG_DIR", "logs"), "docuchat.log")
 
     def setup_logging(self):
         """Configure logging globally."""
+        os.makedirs(self.LOG_DIR, exist_ok=True)
         logging.basicConfig(
             level=getattr(logging, self.LEVEL.upper()),
             format=self.FORMAT,
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler('docuchat.log', encoding='utf-8')
+                logging.FileHandler(self.LOG_FILE, encoding='utf-8')
             ]
         )
-        logging.getLogger('chromadb.telemetry.product.posthog').setLevel(logging.CRITICAL)
+        # Silence chromadb telemetry if present
+        try:
+            import chromadb
+            logging.getLogger('chromadb.telemetry.product.posthog').setLevel(logging.CRITICAL)
+        except Exception:
+            pass
 
 class Config:
     """
     Main configuration class following Singleton pattern.
+    Validation is tolerant in non-production.
     """
     _instance = None
 
@@ -106,23 +122,37 @@ class Config:
         self.api = APIConfig()
         self.files = FileConfig()
         self.logging = LoggingConfig()
+        # Environment flags
+        self.ENV = os.getenv("ENV", "development")  # "production" or "development"
+        # When true, require firebase to initialize successfully at startup
+        self.REQUIRE_FIREBASE = os.getenv("REQUIRE_FIREBASE", "false").lower() == "true"
+        # Admin UIDs (comma separated) allowed for sensitive operations
+        admin_uids = os.getenv("ADMIN_USER_IDS", "")
+        self.ADMIN_USER_IDS = [x.strip() for x in admin_uids.split(",") if x.strip()]
 
         self.logging.setup_logging()
         self._validate_config()
 
     def _validate_config(self):
-        """Validate critical configuration values."""
+        """Validate critical configuration values; be forgiving in development."""
+        # GROQ API key
         if not self.model.GROQ_API_KEY:
-            raise ValueError("GROQ_API_KEY is required. Please set it in .env file")
+            msg = "GROQ_API_KEY is not set in environment"
+            if self.ENV == "production":
+                raise ValueError(msg)
+            else:
+                logging.warning(msg + " — continuing in development mode")
 
+        # Chunk size/overlap check (token-based expectation)
         if self.rag.CHUNK_SIZE <= self.rag.CHUNK_OVERLAP:
             raise ValueError("Chunk size must be greater than chunk overlap")
 
-        if not os.path.exists(self.firebase.SERVICE_ACCOUNT_KEY_PATH):
-            raise FileNotFoundError(f"Firebase service account key not found at: {self.firebase.SERVICE_ACCOUNT_KEY_PATH}")
-
-        if not self.firebase.FIREBASE_WEB_CONFIG:
-            raise ValueError("FIREBASE_WEB_CONFIG_JSON is missing or empty in your .env file.")
+        # Firebase key existence only required when REQUIRE_FIREBASE True
+        if self.REQUIRE_FIREBASE:
+            if not os.path.exists(self.firebase.SERVICE_ACCOUNT_KEY_PATH):
+                raise FileNotFoundError(f"Firebase service account key not found at: {self.firebase.SERVICE_ACCOUNT_KEY_PATH}")
+            if not self.firebase.FIREBASE_WEB_CONFIG:
+                raise ValueError("FIREBASE_WEB_CONFIG_JSON is missing or empty in your .env file.")
 
         logging.info("✅ Configuration validated and loaded successfully")
 

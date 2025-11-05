@@ -1,6 +1,6 @@
 """
 Consolidated API routes with comprehensive error handling.
-FIXED: Removed broken metrics from /status response.
+FIXED: Removed broken metrics from /status response and made upload async-friendly.
 """
 import logging
 import uuid
@@ -22,7 +22,35 @@ from api.schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ... (keep /health, /query, /upload, /documents, /delete endpoints as they are) ...
+# -----------------------------------------------------------------
+# Helper background wrapper
+# -----------------------------------------------------------------
+def _background_process_document(temp_path: str, filename: str, user_uid: str, document_id: str):
+    """
+    Background worker wrapper that calls the synchronous processing function.
+    Logs outcomes. This runs in the background and must handle its own exceptions.
+    """
+    try:
+        logger.info(f"Background: Starting processing for {filename} (ID: {document_id}) user {user_uid}")
+        result = rag_pipeline.process_document(temp_path, filename, user_id=user_uid)
+        if result.get("success"):
+            logger.info(f"Background: Document {filename} processed successfully (ID: {document_id})")
+        else:
+            logger.error(f"Background: Document {filename} processing failed (ID: {document_id}): {result.get('error')}")
+    except Exception as e:
+        logger.exception(f"Background: Unexpected error while processing {filename} (ID: {document_id}): {e}")
+    finally:
+        # Try to clean temp file - don't raise
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+                logger.debug(f"Background: Removed temp file {temp_path}")
+        except Exception as e:
+            logger.warning(f"Background: Failed to cleanup temp file {temp_path}: {e}")
+
+# -----------------------------------------------------------------
+# Health endpoint
+# -----------------------------------------------------------------
 @router.get(
     "/health", 
     response_model=HealthResponse,
@@ -61,6 +89,9 @@ async def health_check():
             ).dict()
         )
 
+# -----------------------------------------------------------------
+# Query endpoint
+# -----------------------------------------------------------------
 @router.post(
     "/query",
     response_model=QueryResponse,
@@ -142,14 +173,25 @@ async def query_documents(request: QueryRequest, user_uid: str = Depends(get_cur
             ).dict()
         )
 
+# -----------------------------------------------------------------
+# Upload endpoint (now background-friendly)
+# -----------------------------------------------------------------
 @router.post(
     "/upload",
     response_model=UploadResponse,
     summary="Upload Document (Secured)",
     description="Upload and process a document for querying"
 )
-async def upload_document(file: UploadFile = File(...), user_uid: str = Depends(get_current_user)):
-    """Upload and process document with comprehensive validation."""
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...), 
+    user_uid: str = Depends(get_current_user)
+):
+    """
+    Upload and process document with validation.
+    This endpoint now responds quickly and processes the document in the background
+    to avoid client-side timeouts for large files.
+    """
     try:
         file_extension = os.path.splitext(file.filename)[1].lower()
         allowed_extensions = ['.pdf', '.txt', '.docx', '.md']
@@ -164,15 +206,16 @@ async def upload_document(file: UploadFile = File(...), user_uid: str = Depends(
                 ).dict()
             )
         
+        # read size safely
         file.file.seek(0, 2)
         file_size = file.file.tell()
         file.file.seek(0)
         
-        if file_size > 50 * 1024 * 1024:  # 50MB
+        if file_size > 200 * 1024 * 1024:  # safety hard limit (200MB)
             raise HTTPException(
                 status_code=413,
                 detail=ErrorResponse(
-                    detail="File too large. Maximum size is 50MB",
+                    detail="File too large. Maximum size is 200MB",
                     error_type="validation_error",
                     timestamp=datetime.now().isoformat()
                 ).dict()
@@ -188,41 +231,34 @@ async def upload_document(file: UploadFile = File(...), user_uid: str = Depends(
                 ).dict()
             )
         
-        file_id = str(uuid.uuid4())
-        temp_filename = f"{file_id}_{file.filename}"
+        # Create a unique temporary filename (will be cleaned up by background worker)
+        document_id = str(uuid.uuid4())
+        temp_filename = f"{document_id}_{file.filename}"
         temp_path = os.path.join("data/uploads", temp_filename)
         
         os.makedirs(os.path.dirname(temp_path), exist_ok=True)
         
+        # Save file to disk quickly
         with open(temp_path, "wb") as f:
             content = await file.read()
             f.write(content)
-        time.sleep(0.1)
         
-        result = rag_pipeline.process_document(temp_path, file.filename, user_id=user_uid)
+        # Schedule background processing
+        background_tasks.add_task(_background_process_document, temp_path, file.filename, user_uid, document_id)
         
-        if not result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=ErrorResponse(
-                    detail=result.get("error", "Document processing failed"),
-                    error_type="processing_error",
-                    timestamp=datetime.now().isoformat()
-                ).dict()
-            )
-        
+        # Return quickly: document_id allows the frontend to poll or show processing state
         return UploadResponse(
-            message="Document uploaded and processed successfully",
+            message="Document uploaded successfully and scheduled for processing",
             filename=file.filename,
-            file_id=file_id,
-            chunks_count=result["chunks_count"],
-            document_id=result["document_id"]
+            file_id=str(uuid.uuid4()),
+            chunks_count=0,
+            document_id=document_id
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Document upload failed: {str(e)}")
+        logger.exception(f"Document upload failed: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
@@ -231,14 +267,10 @@ async def upload_document(file: UploadFile = File(...), user_uid: str = Depends(
                 timestamp=datetime.now().isoformat()
             ).dict()
         )
-    finally:
-        if 'temp_path' in locals() and temp_path and os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                logger.debug(f"Cleaned up temp file: {temp_path}")
-            except OSError as e:
-                logger.warning(f"Could not remove temp file {temp_path}: {e}")
 
+# -----------------------------------------------------------------
+# Documents listing
+# -----------------------------------------------------------------
 @router.get(
     "/documents",
     response_model=DocumentsListResponse,
@@ -276,6 +308,9 @@ async def list_documents(user_uid: str = Depends(get_current_user)):
             ).dict()
         )
 
+# -----------------------------------------------------------------
+# Delete endpoint
+# -----------------------------------------------------------------
 @router.delete(
     "/documents/{document_id}",
     response_model=DeleteResponse,
@@ -317,7 +352,7 @@ async def delete_document(document_id: str, user_uid: str = Depends(get_current_
         )
 
 # -----------------------------------------------------------------
-# 🚨 MODIFIED: `/status` endpoint now has cleaner alerts
+# Status & metrics remain unchanged (returns background-processed docs as they become available)
 # -----------------------------------------------------------------
 @router.get(
     "/status",

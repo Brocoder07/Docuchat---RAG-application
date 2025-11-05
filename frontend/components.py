@@ -1,6 +1,9 @@
 """
 Consolidated Streamlit UI components with professional design and UX.
 FIXED: Logout button now sets session state to None instead of deleting keys.
+IMPROVED: Upload handler now inserts a placeholder document and polls backend once
+to ensure the newly uploaded document appears immediately in the Processed Documents list
+and the dropdown.
 """
 import uuid
 import time
@@ -14,7 +17,6 @@ from core.config import config
 
 logger = logging.getLogger(__name__)
 
-# ... (ComponentStyler remains unchanged) ...
 class ComponentStyler:
     @staticmethod
     def apply_custom_styles():
@@ -76,15 +78,9 @@ class HeaderComponent:
     def render(self):
         """Render the main application header."""
         st.markdown('<div class="main-header">📚 DocuChat - AI Document Q&A</div>', unsafe_allow_html=True)
-        # -----------------------------------------------------------------
-        # 🚨 FIXED: Corrected HTML typo (class.sub-header -> class="sub-header")
-        # -----------------------------------------------------------------
         st.markdown('<div class="sub-header">Ask questions about your documents - Powered by Groq LLM</div>', unsafe_allow_html=True)
         st.divider()
 
-# -----------------------------------------------------------------
-# 🚨 MODIFIED: `SidebarComponent` logout logic
-# -----------------------------------------------------------------
 class SidebarComponent:
     """Sidebar with document management and system info."""
     
@@ -101,12 +97,8 @@ class SidebarComponent:
         with st.sidebar:
             st.header(f"👤 Welcome, {st.session_state.user_email}")
             if st.button("Log Out", use_container_width=True, key="logout"):
-                # -----------------------------------------------------------------
-                # 🚨 FIXED: Set keys to None instead of deleting them
-                # -----------------------------------------------------------------
                 st.session_state.id_token = None
                 st.session_state.user_email = None
-                # -----------------------------------------------------------------
                 st.session_state.auth_page = 'login'
                 st.rerun()
             st.divider()
@@ -120,7 +112,6 @@ class SidebarComponent:
             self._render_actions()
     
     def _render_document_section(self):
-        # ... (this method is unchanged) ...
         st.header("📁 Document Management")
         uploader_key = getattr(st.session_state, 'uploader_key', 'default_uploader')
         uploaded_file = st.file_uploader(
@@ -136,7 +127,10 @@ class SidebarComponent:
         self._render_document_list()
     
     def _handle_file_upload(self, uploaded_file):
-        # ... (this method is unchanged) ...
+        """
+        Save/upload file, create a placeholder in the UI immediately,
+        and poll the backend briefly to fetch the real processed metadata.
+        """
         try:
             file_key = f"{uploaded_file.name}_{uuid.uuid4().hex[:8]}"
             
@@ -149,21 +143,89 @@ class SidebarComponent:
             
             st.session_state.processing_files.add(file_key)
             
-            with st.spinner(f"Processing {uploaded_file.name}..."):
+            with st.spinner(f"Uploading {uploaded_file.name}..."):
+                # Call API client to upload (auth handled inside)
                 result = api_client.upload_document(
                     uploaded_file.getvalue(),
                     uploaded_file.name
                 )
                 
-                if result["success"]:
-                    st.success(f"✅ {result['data']['message']}")
-                    st.session_state.uploader_key = str(uuid.uuid4())
-                    
-                    if hasattr(state_manager, 'update_documents_count'):
-                        current_count = state_manager.get_documents_count()
-                        state_manager.update_documents_count(current_count + 1)
-                else:
-                    st.error(f"❌ {result['error']}")
+                if not result["success"]:
+                    st.error(f"❌ Upload failed: {result.get('error')}")
+                    st.session_state.processing_files.discard(file_key)
+                    return
+                
+                data = result.get("data") or {}
+                message = data.get("message", "Document uploaded")
+                document_id = data.get("document_id") or str(uuid.uuid4())
+                
+                # Immediate UI feedback: add a placeholder entry to the document list
+                placeholder_doc = {
+                    "filename": uploaded_file.name,
+                    "chunks": data.get("chunks_count", 0),
+                    "source": "uploads/" + uploaded_file.name,
+                    "document_id": document_id,
+                    "processed_at": "processing"
+                }
+                
+                # Ensure session state document_list exists
+                if 'document_list' not in st.session_state:
+                    st.session_state.document_list = []
+                
+                # Remove any existing placeholder for same filename to avoid duplicates
+                st.session_state.document_list = [
+                    d for d in st.session_state.document_list if not (d.get("filename") == uploaded_file.name and d.get("processed_at") == "processing")
+                ]
+                
+                st.session_state.document_list.insert(0, placeholder_doc)
+                state_manager.update_documents_count(len(st.session_state.document_list))
+                
+                st.success(f"✅ {message}")
+                st.session_state.uploader_key = str(uuid.uuid4())
+                
+                # Non-blocking short poll: check for processed metadata (briefly)
+                poll_interval = 1.0
+                poll_timeout = 10.0  # seconds (short poll only)
+                elapsed = 0.0
+                found_real = False
+                
+                # Try to fetch the list a few times to see if the background worker finished quickly
+                while elapsed < poll_timeout:
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    try:
+                        docs_result = api_client.list_documents()
+                        if docs_result and docs_result.get("success"):
+                            docs = docs_result["data"].get("documents", [])
+                            # Try to find an entry matching document_id or filename
+                            match = None
+                            for d in docs:
+                                if d.get("document_id") == document_id or d.get("filename") == uploaded_file.name:
+                                    match = d
+                                    break
+                            
+                            if match:
+                                # Replace placeholder with real entry
+                                # Remove existing placeholder(s)
+                                st.session_state.document_list = [d for d in st.session_state.document_list if not (d.get("filename") == uploaded_file.name and d.get("processed_at") == "processing")]
+                                st.session_state.document_list.insert(0, {
+                                    "filename": match.get("filename"),
+                                    "chunks": match.get("chunks"),
+                                    "source": match.get("source"),
+                                    "document_id": match.get("document_id"),
+                                    "processed_at": match.get("processed_at")
+                                })
+                                state_manager.update_documents_count(len(st.session_state.document_list))
+                                found_real = True
+                                logger.info(f"Upload: replaced placeholder with processed document for {uploaded_file.name}")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Upload polling error: {e}")
+                        # keep trying until timeout
+                
+                if not found_real:
+                    # Leave placeholder in the list. UX shows "processing".
+                    st.info("Document uploaded and is being processed in background. It will appear in the list shortly.")
             
             st.session_state.processing_files.discard(file_key)
             
@@ -174,19 +236,28 @@ class SidebarComponent:
                 st.session_state.processing_files.discard(file_key)
     
     def _render_document_list(self):
-        # ... (this method is unchanged) ...
         st.subheader("Processed Documents")
         
         if st.button("🔄 Refresh List", key="refresh_docs", use_container_width=True):
-            if 'last_processed_file' in st.session_state:
-                st.session_state.last_processed_file = None
+            # Force fetch and update session state
+            try:
+                docs_result = api_client.list_documents()
+                if docs_result.get("success"):
+                    docs = docs_result["data"].get("documents", [])
+                    st.session_state.document_list = docs
+                    state_manager.update_documents_count(len(docs))
+                else:
+                    st.error("Failed to refresh document list")
+            except Exception as e:
+                logger.error(f"Refresh error: {e}")
+                st.error("Unable to refresh document list")
             st.rerun()
         
         try:
-            result = api_client.list_documents() 
+            result = api_client.list_documents()
             if result["success"] and result["data"]["documents"]:
                 documents = result["data"]["documents"]
-                
+                # Update session state document_list if it is empty or different
                 st.session_state.document_list = documents
                 
                 for doc in documents:
@@ -202,18 +273,34 @@ class SidebarComponent:
                 
                 st.caption(f"Total: {len(documents)} documents")
             else:
-                st.session_state.document_list = []
-                st.info("No documents processed yet. Upload a document to get started!")
+                # Show any placeholders present in session_state OR fallback message
+                placeholders = [d for d in st.session_state.get('document_list', []) if d.get('processed_at') == 'processing']
+                if placeholders:
+                    for p in placeholders:
+                        with st.container():
+                            col1, col2 = st.columns([3, 1])
+                            with col1:
+                                st.write(f"**{p['filename']}**")
+                                st.caption("Status: processing")
+                            with col2:
+                                # Disabled delete while processing to avoid accidental removes
+                                st.button("🗑️", key=f"del_placeholder_{p['document_id']}", disabled=True)
+                    st.caption(f"Total: {len(st.session_state.get('document_list', []))} (including processing)")
+                else:
+                    st.session_state.document_list = []
+                    st.info("No documents processed yet. Upload a document to get started!")
         except Exception as e:
             logger.error(f"Error rendering document list: {str(e)}")
             st.error("Unable to load document list")
     
     def _delete_document(self, document_id: str):
-        # ... (this method is unchanged) ...
         try:
             result = api_client.delete_document(document_id)
             if result["success"]:
                 st.success("Document deleted successfully!")
+                # Remove from session_state.document_list immediately
+                st.session_state.document_list = [d for d in st.session_state.get('document_list', []) if d.get('document_id') != document_id]
+                state_manager.update_documents_count(len(st.session_state.get('document_list', [])))
                 st.rerun()
             else:
                 st.error(f"Delete failed: {result['error']}")
@@ -222,7 +309,6 @@ class SidebarComponent:
             st.error(f"Delete failed: {str(e)}")
     
     def _render_quick_questions(self):
-        # ... (this method is unchanged) ...
         st.header("🎯 Quick Questions")
         
         for question in self.quick_questions:
@@ -231,7 +317,6 @@ class SidebarComponent:
                 st.rerun()
     
     def _render_system_info(self):
-        # ... (this method is unchanged) ...
         st.header("📊 System Info")
         
         health_info = api_client.get_health_info()
@@ -258,7 +343,6 @@ class SidebarComponent:
             st.warning("Unable to fetch system information")
     
     def _render_actions(self):
-        # ... (this method is unchanged) ...
         st.header("⚡ Actions")
         
         col1, col2 = st.columns(2)
@@ -272,7 +356,6 @@ class SidebarComponent:
                 st.rerun()
 
 class ChatAreaComponent:
-    # ... (this class is unchanged) ...
     def __init__(self):
         self.processing_query = False
         
@@ -464,7 +547,6 @@ class ChatAreaComponent:
             self.processing_query = False
 
 class SystemStatusComponent:
-    # ... (this class is unchanged) ...
     def render(self):
         if st.sidebar.button("📊 System Dashboard", use_container_width=True):
             st.session_state.show_dashboard = True
@@ -524,7 +606,6 @@ class SystemStatusComponent:
             st.rerun()
 
 class ComponentFactory:
-    # ... (this class is unchanged) ...
     def __init__(self):
         self.components = {
             'styler': ComponentStyler(),

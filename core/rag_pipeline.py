@@ -1,6 +1,6 @@
 """
 Main RAG pipeline orchestrator - Upgraded with Security (Firebase UID as str).
-FIXED: get_status user_id is now Optional.
+FIXED: get_status user_id is now Optional and context builder robustified.
 """
 import logging
 import uuid
@@ -19,19 +19,14 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     
     def __init__(self):
-        # ... (this method is unchanged) ...
         self.initialized = False
         self.processed_documents = [] 
         self.query_history = []
-        
-        from core.vector_store import vector_store
-        from core.llm_service import llm_service
         
         self.vector_store = vector_store
         self.llm_service = llm_service
     
     def initialize(self) -> bool:
-        # ... (this method is unchanged) ...
         try:
             logger.info("🚀 Initializing RAG Pipeline...")
             
@@ -53,7 +48,6 @@ class RAGPipeline:
             return False
     
     def _clean_query_for_routing(self, question: str) -> str:
-        # ... (this method is unchanged) ...
         constraint_patterns = [
             r"in \d+-\d+ words",
             r"in \d+ words",
@@ -74,7 +68,6 @@ class RAGPipeline:
         return cleaned_question
     
     def _build_empty_source_info(self) -> Dict[str, Any]:
-        # ... (this method is unchanged) ...
         return {
             "total_sources": 0,
             "documents": [],
@@ -84,19 +77,23 @@ class RAGPipeline:
         }
     
     def _build_context(self, relevant_chunks: List[Tuple]) -> str:
-        # ... (this method is unchanged) ...
+        """
+        Build a nicely formatted context string from retrieved chunks.
+        This function coerces chunk text to str to avoid None-type issues.
+        """
         context_parts = []
         
         for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
-            source = metadata.get('source', 'Unknown')
+            # Defensive coercion: ensure chunk_text is string
+            chunk_text_safe = chunk_text if isinstance(chunk_text, str) else (str(chunk_text) if chunk_text is not None else "")
+            source = metadata.get('source', 'Unknown') if isinstance(metadata, dict) else 'Unknown'
             context_parts.append(f"[Source: {source} | Relevance: {score:.2f}]")
-            context_parts.append(chunk_text)
+            context_parts.append(chunk_text_safe)
             context_parts.append("")
         
         return "\n".join(context_parts)
     
     def _prepare_source_info(self, relevant_chunks: List[Tuple]) -> Dict[str, Any]:
-        # ... (this method is unchanged) ...
         if not relevant_chunks:
             return {
                 "total_sources": 0,
@@ -109,21 +106,23 @@ class RAGPipeline:
         chunk_details = []
         
         for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
-            doc_name = metadata.get('source', 'Unknown Document')
+            doc_name = metadata.get('source', 'Unknown Document') if isinstance(metadata, dict) else 'Unknown Document'
             documents.add(doc_name)
             
+            chunk_str = chunk_text if isinstance(chunk_text, str) else (str(chunk_text) if chunk_text is not None else "")
             chunk_details.append({
                 'document': doc_name,
-                'content_preview': chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text,
+                'content_preview': chunk_str[:200] + "..." if len(chunk_str) > 200 else chunk_str,
                 'confidence': float(score),
-                'chunk_id': metadata.get('chunk_id', f'chunk_{i+1}')
+                'chunk_id': metadata.get('chunk_id', f'chunk_{i+1}') if isinstance(metadata, dict) else f'chunk_{i+1}'
             })
         
         source_scores = {}
         for chunk in relevant_chunks:
-            doc_name = chunk[2].get('source', 'Unknown Document')
+            meta = chunk[2] if isinstance(chunk[2], dict) else {}
+            doc_name = meta.get('source', 'Unknown Document')
             score = chunk[1]
-            source_scores[doc_name] = source_scores.get(doc_name, 0) + score
+            source_scores[doc_name] = source_scores.get(doc_name, 0.0) + float(score)
         
         primary_source = max(source_scores.items(), key=lambda x: x[1])[0] if source_scores else "Unknown"
         
@@ -137,7 +136,6 @@ class RAGPipeline:
 
     
     def process_document(self, file_path: str, filename: str, user_id: str) -> Dict[str, Any]:
-        # ... (this method is unchanged) ...
         if not self.initialized:
             return {"success": False, "error": "Pipeline not initialized", "document_id": None}
         
@@ -178,11 +176,10 @@ class RAGPipeline:
             }
             
         except Exception as e:
-            logger.error(f"❌ Document processing failed: {str(e)}")
+            logger.error(f"❌ Document processing failed: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Processing error: {str(e)}", "document_id": None}
     
     def query(self, question: str, user_id: str, top_k: Optional[int] = None, filename: Optional[str] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-        # ... (this method is unchanged) ...
         if not self.initialized:
             return {"success": False, "answer": "Pipeline not initialized...", "sources": [], "source_info": self._build_empty_source_info(), "error": "Pipeline not initialized"}
     
@@ -195,10 +192,10 @@ class RAGPipeline:
             if query_type == "general":
                 logger.info("🔄 Query is 'general'. Rewriting with HyDE...")
                 hyde_result = llm_service.generate_hypothetical_query(cleaned_question)
-                search_query = hyde_result["query"]
+                search_query = hyde_result.get("query", cleaned_question)
                 
-                if not hyde_result["success"]:
-                    logger.warning(f"⚠️ HyDE failed, falling back... Error: {hyde_result['error']}")
+                if not hyde_result.get("success", False):
+                    logger.warning(f"⚠️ HyDE failed, falling back... Error: {hyde_result.get('error')}")
                     search_query = cleaned_question
             else:
                 logger.info("✅ Query is 'specific'. Using original query for search.")
@@ -218,18 +215,18 @@ class RAGPipeline:
             context = self._build_context(relevant_chunks)
             llm_result = llm_service.generate_answer(question, context, chat_history)
         
-            if not llm_result["success"]:
+            if not llm_result.get("success", False):
                 return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": llm_result.get("error", "LLM error")}
         
             source_info = self._prepare_source_info(relevant_chunks)
-            confidence = self._calculate_confidence(relevant_chunks, llm_result["answer"])
-            self._track_query(question, llm_result["answer"], len(relevant_chunks))
+            confidence = self._calculate_confidence(relevant_chunks, llm_result.get("answer", ""))
+            self._track_query(question, llm_result.get("answer", ""), len(relevant_chunks))
         
             logger.info(f"✅ Query processed successfully: {len(relevant_chunks)} chunks used")
         
             return {
                 "success": True,
-                "answer": llm_result["answer"],
+                "answer": llm_result.get("answer", ""),
                 "sources": relevant_chunks,
                 "source_info": source_info,
                 "confidence": confidence,
@@ -238,19 +235,18 @@ class RAGPipeline:
             }
         
         except Exception as e:
-            logger.error(f"❌ Query processing failed: {str(e)}")
+            logger.error(f"❌ Query processing failed: {str(e)}", exc_info=True)
             return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": str(e)}
 
     
     def _calculate_confidence(self, relevant_chunks: List[Tuple], answer: str) -> str:
-        # ... (this method is unchanged) ...
         if not relevant_chunks:
             return "very low"
         
         avg_similarity = sum(score for _, score, _ in relevant_chunks) / len(relevant_chunks)
         answer_length_factor = min(1.0, len(answer) / 100)
         
-        uncertainty_phrases = ['cannot find', 'not provided', 'unable to', 'no information']
+        uncertainty_phrases = ['cannot find', 'not provided', 'unable to', 'no information', "i couldn't find", "i could not find"]
         uncertainty_penalty = 0.0
         for phrase in uncertainty_phrases:
             if phrase in answer.lower():
@@ -271,7 +267,6 @@ class RAGPipeline:
             return "very low"
     
     def _track_query(self, question: str, answer: str, chunks_used: int):
-        # ... (this method is unchanged) ...
         query_record = {
             "question": question,
             "answer_preview": answer[:100] + "..." if len(answer) > 100 else answer,
@@ -283,15 +278,11 @@ class RAGPipeline:
         if len(self.query_history) > 50:
             self.query_history = self.query_history[-50:]
     
-    # -----------------------------------------------------------------
-    # 🚨 MODIFIED: `get_status` now accepts `Optional[str]`
-    # -----------------------------------------------------------------
     def get_status(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """Get comprehensive pipeline status (global or user-specific)."""
         
         llm_status = self.llm_service.get_status()
         
-        # Get stats (user-specific or global)
         vector_stats = self.vector_store.get_collection_stats(user_id=user_id)
         
         docs_processed = 0
@@ -299,7 +290,6 @@ class RAGPipeline:
             user_docs = self.list_documents(user_id=user_id)
             docs_processed = len(user_docs)
         elif vector_stats:
-             # For public health check, report global doc count
             docs_processed = vector_stats.get("unique_documents", 0)
 
         return {
@@ -312,11 +302,9 @@ class RAGPipeline:
         }
     
     def list_documents(self, user_id: str) -> List[Dict[str, Any]]:
-        # ... (this method is unchanged) ...
         return self.vector_store.list_documents_by_user(user_id=user_id)
     
     def delete_document(self, document_id: str, user_id: str) -> bool:
-        # ... (this method is unchanged) ...
         try:
             doc_metadata = self.vector_store.get_document_metadata(document_id, user_id)
             if not doc_metadata:

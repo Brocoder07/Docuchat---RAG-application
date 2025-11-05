@@ -1,38 +1,36 @@
 """
-FastAPI application with production-ready configuration.
-Now uses Firebase Admin for auth dependency.
+FastAPI application with production-ready configuration and lazy Firebase init.
 """
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
 
 from core.config import config
-from api.routes import router as v1_router # 🚨 Renamed
-# 🚨 NO auth_router, NO database imports
+from api.routes import router as v1_router
+from core.firebase import init_firebase
 
-# Configure logging
 logger = logging.getLogger(__name__)
-
-# 🚨 NOTE: No need to create DB tables here anymore
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan events for startup and shutdown."""
-    # Startup
     logger.info("🚀 Starting DocuChat API...")
-    
+
+    # Initialize Firebase lazily if configured or required
+    try:
+        firebase_ok = init_firebase()
+        if not firebase_ok:
+            logger.warning("Firebase initialization failed or not configured. Auth endpoints will be disabled.")
+    except Exception as e:
+        logger.warning(f"Firebase initialization exception: {e}")
+
+    # Initialize RAG pipeline in a thread to avoid blocking event loop
     try:
         from core.rag_pipeline import rag_pipeline
-        
-        # Initialize RAG pipeline with timeout
-        import asyncio
-        from concurrent.futures import ThreadPoolExecutor
-        
-        with ThreadPoolExecutor() as executor:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(rag_pipeline.initialize)
             try:
                 initialized = future.result(timeout=90)
@@ -40,21 +38,16 @@ async def lifespan(app: FastAPI):
                     logger.info("✅ RAG Pipeline initialized successfully")
                 else:
                     logger.error("❌ RAG Pipeline initialization failed")
-            except TimeoutError:
-                logger.error("❌ RAG Pipeline initialization timed out")
             except Exception as e:
                 logger.error(f"❌ RAG Pipeline initialization error: {str(e)}")
-                
     except Exception as e:
         logger.error(f"❌ Startup initialization failed: {str(e)}")
-    
-    yield  # App runs here
-    
-    # Shutdown
+
+    yield
+
     logger.info("🛑 Shutting down DocuChat API...")
 
 def create_application() -> FastAPI:
-    """Application factory following best practices."""
     application = FastAPI(
         title="DocuChat API",
         description="AI-powered Document Q&A System with RAG Pipeline",
@@ -64,7 +57,7 @@ def create_application() -> FastAPI:
         openapi_url="/openapi.json",
         lifespan=lifespan
     )
-    
+
     application.add_middleware(
         CORSMiddleware,
         allow_origins=config.api.ALLOW_ORIGINS,
@@ -72,22 +65,14 @@ def create_application() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # -----------------------------------------------------------------
-    # 🚨 MODIFIED: Only one router
-    # -----------------------------------------------------------------
+
     application.include_router(v1_router, prefix="/api/v1", tags=["RAG Pipeline"])
-    # -----------------------------------------------------------------
-    
     return application
 
-# Create application instance
 app = create_application()
 
-# ... (keep /docs and / root endpoints) ...
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui_html():
-    """Custom Swagger UI with better styling."""
     return get_swagger_ui_html(
         openapi_url="/openapi.json",
         title="DocuChat API Documentation",
@@ -96,21 +81,8 @@ async def custom_swagger_ui_html():
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information."""
-    return {
-        "message": "Welcome to DocuChat API",
-        "version": "2.0.0",
-        "description": "AI-powered Document Q&A System",
-        "docs": "/docs",
-        "health": "/api/v1/health"
-    }
+    return {"message": "Welcome to DocuChat API", "version": "2.0.0", "docs": "/docs", "health": "/api/v1/health"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "api.main:app",
-        host=config.api.HOST,
-        port=config.api.PORT,
-        reload=False,
-        log_level="info"
-    )
+    uvicorn.run("api.main:app", host=config.api.HOST, port=config.api.PORT, reload=False, log_level="info")
