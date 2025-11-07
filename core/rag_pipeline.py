@@ -1,6 +1,9 @@
 """
 Main RAG pipeline orchestrator - Upgraded with Security (Firebase UID as str).
 FIXED: get_status user_id is now Optional and context builder robustified.
+ADDED: Granular performance tracking for retrieval, routing, and generation latency.
+ADDED: Special logic path for "summary" queries to retrieve full context.
+ADDED: file_hash to process_document to store as metadata for duplicate checking.
 """
 import logging
 import uuid
@@ -8,17 +11,20 @@ import os
 import re
 from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime
+import time
 
 from core.config import config
 from core.llm_service import llm_service
 from core.vector_store import vector_store
 from core.document_processor import document_processor
+from core.evaluator import evaluator
 
 logger = logging.getLogger(__name__)
 
 class RAGPipeline:
     
     def __init__(self):
+        # ... (no changes)
         self.initialized = False
         self.processed_documents = [] 
         self.query_history = []
@@ -27,6 +33,7 @@ class RAGPipeline:
         self.llm_service = llm_service
     
     def initialize(self) -> bool:
+        # ... (no changes)
         try:
             logger.info("🚀 Initializing RAG Pipeline...")
             
@@ -38,6 +45,9 @@ class RAGPipeline:
                 logger.error("❌ Failed to initialize LLM service")
                 return False
             
+            if not evaluator.grounding_model:
+                 logger.warning("❌ RAG evaluator grounding model not initialized. Evaluation may be limited.")
+
             self.initialized = True
             logger.info("✅ RAG Pipeline initialized successfully")
             return True
@@ -47,6 +57,7 @@ class RAGPipeline:
             self.initialized = False
             return False
     
+    # ... (no changes to helper methods _clean_query_for_routing, _build_empty_source_info, _build_context, _prepare_source_info) ...
     def _clean_query_for_routing(self, question: str) -> str:
         constraint_patterns = [
             r"in \d+-\d+ words",
@@ -77,17 +88,15 @@ class RAGPipeline:
         }
     
     def _build_context(self, relevant_chunks: List[Tuple]) -> str:
-        """
-        Build a nicely formatted context string from retrieved chunks.
-        This function coerces chunk text to str to avoid None-type issues.
-        """
         context_parts = []
         
         for i, (chunk_text, score, metadata) in enumerate(relevant_chunks):
-            # Defensive coercion: ensure chunk_text is string
             chunk_text_safe = chunk_text if isinstance(chunk_text, str) else (str(chunk_text) if chunk_text is not None else "")
             source = metadata.get('source', 'Unknown') if isinstance(metadata, dict) else 'Unknown'
-            context_parts.append(f"[Source: {source} | Relevance: {score:.2f}]")
+            if score < 99.0: 
+                context_parts.append(f"[Source: {source} | Relevance: {score:.2f}]")
+            else:
+                context_parts.append(f"[Source: {source}]")
             context_parts.append(chunk_text_safe)
             context_parts.append("")
         
@@ -99,7 +108,8 @@ class RAGPipeline:
                 "total_sources": 0,
                 "documents": [],
                 "primary_source": "None",
-                "chunk_details": []
+                "chunk_details": [],
+                "retrieved_count": 0
             }
         
         documents = set()
@@ -134,13 +144,25 @@ class RAGPipeline:
             "retrieved_count": len(relevant_chunks)
         }
 
-    
-    def process_document(self, file_path: str, filename: str, user_id: str) -> Dict[str, Any]:
+    # -----------------------------------------------------------------
+    # 🚨 START: MODIFIED process_document
+    # -----------------------------------------------------------------
+    def process_document(
+        self, 
+        file_path: str, 
+        filename: str, 
+        user_id: str,
+        file_hash: str,      # 🚨 Added
+        document_id: str   # 🚨 Added
+    ) -> Dict[str, Any]:
+    # -----------------------------------------------------------------
+    # 🚨 END: MODIFIED process_document
+    # -----------------------------------------------------------------
         if not self.initialized:
             return {"success": False, "error": "Pipeline not initialized", "document_id": None}
         
         try:
-            document_id = str(uuid.uuid4())
+            # document_id is now passed in from the route
             logger.info(f"📦 Processing document: {filename} (ID: {document_id}) for user {user_id}")
             
             processing_result = document_processor.process_file(file_path, filename)
@@ -158,6 +180,7 @@ class RAGPipeline:
                     "filename": filename,
                     "document_id": document_id,
                     "user_id": user_id,
+                    "file_hash": file_hash,  # 🚨 Store the hash in metadata
                     "chunk_index": i,
                     "total_chunks": len(chunks),
                     "processed_at": datetime.now().isoformat()
@@ -179,54 +202,127 @@ class RAGPipeline:
             logger.error(f"❌ Document processing failed: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Processing error: {str(e)}", "document_id": None}
     
+    # -----------------------------------------------------------------
+    # 🚨 START: NEW METHOD for duplicate check
+    # -----------------------------------------------------------------
+    def check_document_exists(self, file_hash: str, user_id: str) -> bool:
+        """
+        Checks if a document with the same hash already exists for this user.
+        """
+        if not self.initialized:
+            logger.warning("check_document_exists called before pipeline initialized")
+            return False
+        
+        try:
+            return self.vector_store.check_hash_exists(file_hash, user_id)
+        except Exception as e:
+            logger.error(f"Error checking for document hash: {e}")
+            # Fail-safe: allow upload to proceed if check fails
+            return False
+    # -----------------------------------------------------------------
+    # 🚨 END: NEW METHOD
+    # -----------------------------------------------------------------
+
     def query(self, question: str, user_id: str, top_k: Optional[int] = None, filename: Optional[str] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+        # ... (no changes in query method)
         if not self.initialized:
             return {"success": False, "answer": "Pipeline not initialized...", "sources": [], "source_info": self._build_empty_source_info(), "error": "Pipeline not initialized"}
-    
+        
+        start_pipeline = time.perf_counter()
+        timings = {"routing": 0.0, "hyde": 0.0, "retrieval": 0.0, "generation": 0.0, "total": 0.0}
+        
+        context = ""
+        answer = "I couldn't find any relevant information in the document."
+        llm_result = {}
+        relevant_chunks = []
+        
+        q_lower = question.lower()
+        is_summary_request = ("summary" in q_lower or "summarize" in q_lower or "what is this" in q_lower or "general idea" in q_lower)
+
         try:
             logger.info(f"🔍 Processing query for user {user_id}: {question}")
-            
-            cleaned_question = self._clean_query_for_routing(question)
-            query_type = llm_service.route_query(cleaned_question)
-            
-            if query_type == "general":
-                logger.info("🔄 Query is 'general'. Rewriting with HyDE...")
-                hyde_result = llm_service.generate_hypothetical_query(cleaned_question)
-                search_query = hyde_result.get("query", cleaned_question)
+
+            if is_summary_request and filename:
+                logger.info(f"🔄 Summary path triggered for file: {filename}")
+                start_retrieval = time.perf_counter()
                 
-                if not hyde_result.get("success", False):
-                    logger.warning(f"⚠️ HyDE failed, falling back... Error: {hyde_result.get('error')}")
-                    search_query = cleaned_question
-            else:
-                logger.info("✅ Query is 'specific'. Using original query for search.")
-                search_query = question
+                relevant_chunks = self.vector_store.get_all_chunks_for_file(
+                    filename=filename,
+                    user_id=user_id,
+                    limit=50 
+                )
+                timings["retrieval"] = time.perf_counter() - start_retrieval
+                logger.info(f"🔍 Summary retrieval found {len(relevant_chunks)} chunks. (Retrieval: {timings['retrieval']:.2f}s)")
             
-            relevant_chunks = self.vector_store.search(
-                search_query, 
-                user_id=user_id,
-                top_k=top_k, 
-                filename=filename
-            )
-        
+            else:
+                cleaned_question = self._clean_query_for_routing(question)
+                
+                start_route = time.perf_counter()
+                query_type = llm_service.route_query(cleaned_question)
+                timings["routing"] = time.perf_counter() - start_route
+                
+                if query_type == "general":
+                    logger.info(f"🔄 Query is 'general'. Rewriting with HyDE... (Routing: {timings['routing']:.2f}s)")
+                    start_hyde = time.perf_counter()
+                    hyde_result = llm_service.generate_hypothetical_query(cleaned_question)
+                    timings["hyde"] = time.perf_counter() - start_hyde
+                    
+                    search_query = hyde_result.get("query", cleaned_question)
+                    if not hyde_result.get("success", False):
+                        logger.warning(f"⚠️ HyDE failed, falling back... Error: {hyde_result.get('error')} (HyDE Time: {timings['hyde']:.2f}s)")
+                    else:
+                        logger.info(f"✅ HyDE rewrite successful. (HyDE Time: {timings['hyde']:.2f}s)")
+                else:
+                    logger.info(f"✅ Query is 'specific'. Using original query. (Routing: {timings['routing']:.2f}s)")
+                    search_query = question
+                
+                start_retrieval = time.perf_counter()
+                relevant_chunks_unfiltered = self.vector_store.search(
+                    search_query, 
+                    user_id=user_id,
+                    top_k=top_k, 
+                    filename=filename
+                )
+                timings["retrieval"] = time.perf_counter() - start_retrieval
+                logger.info(f"🔍 Retrieval found {len(relevant_chunks_unfiltered)} potential chunks. (Retrieval: {timings['retrieval']:.2f}s)")
+                
+                threshold = config.rag.SIMILARITY_THRESHOLD
+                relevant_chunks = [
+                    chunk for chunk in relevant_chunks_unfiltered if chunk[1] >= threshold
+                ]
+                logger.info(f"Retrieved {len(relevant_chunks_unfiltered)} chunks, "
+                            f"kept {len(relevant_chunks)} after threshold ({threshold})")
+
             if not relevant_chunks:
-                logger.info(f"❌ No relevant content found for user {user_id}: {question}")
-                return {"success": True, "answer": "I couldn't find any relevant information...", "sources": [], "source_info": self._build_empty_source_info(), "confidence": "very low", "chunks_retrieved": 0, "model_used": "none"}
-        
-            context = self._build_context(relevant_chunks)
-            llm_result = llm_service.generate_answer(question, context, chat_history)
-        
-            if not llm_result.get("success", False):
-                return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": llm_result.get("error", "LLM error")}
+                logger.info(f"❌ No relevant content found *above threshold* for user {user_id}: {question}")
+            else:
+                context = self._build_context(relevant_chunks)
+                
+                start_generation = time.perf_counter()
+                
+                llm_result = llm_service.generate_answer(
+                    question, 
+                    context, 
+                    chat_history,
+                    is_summary=is_summary_request
+                )
+                
+                timings["generation"] = time.perf_counter() - start_generation
+            
+                if not llm_result.get("success", False):
+                    answer = "I encountered an error..."
+                    logger.error(f"❌ LLM generation failed. (Generation: {timings['generation']:.2f}s)")
+                else:
+                    answer = llm_result.get("answer", "")
+                    logger.info(f"✅ LLM generation successful. (Generation: {timings['generation']:.2f}s)")
         
             source_info = self._prepare_source_info(relevant_chunks)
-            confidence = self._calculate_confidence(relevant_chunks, llm_result.get("answer", ""))
-            self._track_query(question, llm_result.get("answer", ""), len(relevant_chunks))
-        
-            logger.info(f"✅ Query processed successfully: {len(relevant_chunks)} chunks used")
+            confidence = self._calculate_confidence(relevant_chunks, answer)
+            self._track_query(question, answer, len(relevant_chunks))
         
             return {
                 "success": True,
-                "answer": llm_result.get("answer", ""),
+                "answer": answer,
                 "sources": relevant_chunks,
                 "source_info": source_info,
                 "confidence": confidence,
@@ -237,8 +333,21 @@ class RAGPipeline:
         except Exception as e:
             logger.error(f"❌ Query processing failed: {str(e)}", exc_info=True)
             return {"success": False, "answer": "I encountered an error...", "sources": [], "source_info": self._build_empty_source_info(), "error": str(e)}
-
+        
+        finally:
+            timings["total"] = time.perf_counter() - start_pipeline
+            logger.info(f"🏁 Query processing finished. (Total Time: {timings['total']:.2f}s)")
+            
+            evaluator.evaluate_query(
+                question=question,
+                answer=answer,
+                context=context,
+                relevant_chunks=relevant_chunks,
+                response_time=timings["total"],
+                timings=timings
+            )
     
+    # ... (no changes to _calculate_confidence, _track_query, get_status, list_documents, delete_document) ...
     def _calculate_confidence(self, relevant_chunks: List[Tuple], answer: str) -> str:
         if not relevant_chunks:
             return "very low"

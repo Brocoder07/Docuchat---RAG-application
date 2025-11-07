@@ -1,6 +1,7 @@
 """
 Main Streamlit application with full Firebase authentication routing.
 FIXED: Initialized st.session_state.selected_filename.
+FIXED: Resolved initialization race condition for 'id_token' on first load.
 """
 import streamlit as st
 import logging
@@ -59,12 +60,13 @@ class ApplicationInitializer:
             
             self._configure_page()
             
-            # Initialize session state (basic keys)
-            state_manager.initialize_session()
+            # -----------------------------------------------------------------
+            # 🚨 START: ROBUST INITIALIZATION
+            # We initialize *all* session state keys here to prevent errors.
+            # -----------------------------------------------------------------
+            state_manager.initialize_session() # Initializes defaults
             
-            # -----------------------------------------------------------------
-            # 🚨 MODIFIED: Initialize all session state variables here
-            # -----------------------------------------------------------------
+            # Initialize auth-specific keys
             if 'app_initialized' not in st.session_state:
                 st.session_state.app_initialized = False
             if 'id_token' not in st.session_state:
@@ -76,11 +78,11 @@ class ApplicationInitializer:
             if 'session_restored' not in st.session_state:
                 st.session_state.session_restored = False
             
-            # -----------------------------------------------------------------
-            # 🚨 FIXED: Add the missing variable initialization
-            # -----------------------------------------------------------------
+            # Initialize UI-specific keys
             if 'selected_filename' not in st.session_state:
                 st.session_state.selected_filename = "All Documents"
+            # -----------------------------------------------------------------
+            # 🚨 END: ROBUST INITIALIZATION
             # -----------------------------------------------------------------
 
             if not self._check_backend_connectivity():
@@ -212,24 +214,42 @@ def main():
     Main application entry point with authentication routing.
     """
     try:
-        initializer = ApplicationInitializer()
+        # -----------------------------------------------------------------
+        # 🚨 START: FIX FOR INITIALIZATION
+        # -----------------------------------------------------------------
         
+        # Run initialization *first* to ensure all session state keys exist
+        initializer = ApplicationInitializer()
         if not initializer.initialize():
             ErrorHandler.render_backend_unavailable()
             return
-        
+
         component_factory.components['styler'].apply_custom_styles()
+
+        # Now we can safely read the keys, as they are guaranteed to exist.
+        id_token = st.session_state.id_token
+        session_restored = st.session_state.session_restored
         
-        # Try to restore the session from browser storage if it's not in st.session_state
-        if not st.session_state.id_token and not st.session_state.session_restored:
+        # Try to restore session only on the very first run
+        if not id_token and not session_restored:
             auth_component_factory.try_restore_session()
+            # try_restore_session() will call st.rerun() if it finds a session,
+            # which re-starts this main() function from the top.
         
-        # Now, check for the token again
-        if not st.session_state.id_token:
+        # Re-check id_token after potential restore
+        id_token = st.session_state.id_token
+        
+        if not id_token:
+            # If still no token, show login page
             auth_component_factory.render_auth_page()
         else:
+            # If token exists, run the main app
             component_factory.render_all()
             _render_footer(initializer.startup_time)
+        
+        # -----------------------------------------------------------------
+        # 🚨 END: FIX FOR INITIALIZATION
+        # -----------------------------------------------------------------
 
     except Exception as e:
         logger.error(f"🚨 Critical application error: {str(e)}", exc_info=True)
@@ -239,6 +259,7 @@ def main():
         )
 
 def _render_footer(startup_time):
+    # ... (no changes in this function) ...
     st.divider()
     
     col1, col2, col3 = st.columns(3)

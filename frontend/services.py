@@ -1,22 +1,22 @@
 """
 Frontend API client with full Firebase JWT authentication handling.
+
+REFACTORED: SessionStateManager now manages a dictionary of chat histories,
+            one for each document context, to provide persistent chats.
 """
 import logging
 import requests
 from typing import Dict, Any, Optional, List
 import time
 from datetime import datetime
-import streamlit as st # 🚨 Import Streamlit
+import streamlit as st
 
 from core.config import config
 
 logger = logging.getLogger(__name__)
 
 class APIClient:
-    """
-    Robust API client with JWT retry mechanism and auth error handling.
-    """
-    
+    # ... (no changes to APIClient class) ...
     def __init__(self):
         self.base_url = f"http://{config.api.HOST}:{config.api.PORT}/api/v1"
         self.default_timeout = 30
@@ -24,13 +24,7 @@ class APIClient:
         self.max_retries = 2
         self.retry_delay = 2
     
-    # -----------------------------------------------------------------
-    # Modified: `_make_request` now sends the Firebase ID token
-    # -----------------------------------------------------------------
     def _make_request(self, method: str, endpoint: str, timeout: Optional[int] = None, **kwargs) -> Dict[str, Any]:
-        """
-        Make HTTP request with Firebase ID token and auth error handling.
-        """
         if timeout is None:
             timeout = self.default_timeout
             
@@ -38,7 +32,6 @@ class APIClient:
         
         headers = kwargs.pop('headers', {})
         
-        # 🚨 Get Firebase ID token from session state
         token = st.session_state.get('id_token')
         if not token:
             logger.error("No access token found for secure request.")
@@ -110,12 +103,7 @@ class APIClient:
         
         return {"success": False, "error": "Max retries exceeded"}
     
-    # -----------------------------------------------------------------
-    # NOTE: login, register, get_me are GONE.
-    # -----------------------------------------------------------------
-    
     def check_health(self) -> bool:
-        """Check if API is healthy and responsive."""
         try:
             response = requests.get(f"{self.base_url}/health", timeout=5)
             return response.status_code == 200
@@ -123,22 +111,12 @@ class APIClient:
             return False
     
     def get_health_info(self) -> Optional[Dict[str, Any]]:
-        """Get detailed health information."""
         result = self._make_request("GET", "/health")
         return result.get("data") if result["success"] else None
     
     def upload_document(self, file_data: bytes, filename: str) -> Dict[str, Any]:
-        """
-        Upload document with auth.
-
-        Two behaviors:
-         - If backend processes synchronously, frontend waits (timeout increased).
-         - Otherwise, backend will return immediately with a document_id and process in background.
-        """
         try:
             files = {"file": (filename, file_data)}
-            # Use an increased timeout to allow synchronous processing if needed (5 minutes).
-            # If backend uses BackgroundTasks this will return quickly anyway.
             upload_timeout = max(self.default_timeout, 300)
             return self._make_request("POST", "/upload", files=files, timeout=upload_timeout)
         except Exception as e:
@@ -146,15 +124,12 @@ class APIClient:
             return {"success": False, "error": f"Upload failed: {str(e)}"}
     
     def query_documents(self, question: str, top_k: int = 5, filename: Optional[str] = None, chat_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-        """Query documents. Auth is handled by _make_request."""
-        
         payload = {
             "question": question,
             "top_k": top_k,
             "filename": filename,
             "chat_history": chat_history
         }
-        
         return self._make_request(
             "POST",
             "/query",
@@ -163,28 +138,32 @@ class APIClient:
         )
     
     def list_documents(self) -> Dict[str, Any]:
-        """Get list of processed documents (for current user)."""
         return self._make_request("GET", "/documents")
     
     def delete_document(self, document_id: str) -> Dict[str, Any]:
-        """Delete a specific document (for current user)."""
         return self._make_request("DELETE", f"/documents/{document_id}")
     
     def get_system_status(self) -> Dict[str, Any]:
-        """Get comprehensive system status (for current user)."""
         return self._make_request("GET", "/status")
     
     def get_evaluation_metrics(self) -> Dict[str, Any]:
-        """Get evaluation metrics."""
         return self._make_request("GET", "/evaluation/metrics")
 
-# ... (keep SessionStateManager class exactly as it is) ...
 class SessionStateManager:
     """Manage frontend session state with persistence."""
     
     def __init__(self):
         self.default_state = {
-            'chat_history': [],
+            # -----------------------------------------------------------------
+            # 🚨 MODIFIED: chat_history is now a DICTIONARY
+            # It will look like:
+            # {
+            #   "All Documents": [ ... (chat messages) ... ],
+            #   "doc_1.pdf": [ ... (chat messages) ... ],
+            #   "doc_2.txt": [ ... (chat messages) ... ]
+            # }
+            # -----------------------------------------------------------------
+            'chat_history': {},
             'documents_loaded': 0,
             'api_healthy': False,
             'last_update': None,
@@ -193,28 +172,42 @@ class SessionStateManager:
     
     def initialize_session(self):
         """Initialize or reset session state."""
-        import streamlit as st
-        
         for key, value in self.default_state.items():
             if key not in st.session_state:
                 st.session_state[key] = value
         
         st.session_state['last_update'] = datetime.now().isoformat()
     
+    def _get_current_chat_list(self) -> List[Dict[str, Any]]:
+        """
+        Internal helper to get the chat list for the *currently selected* document.
+        """
+        # Get the name of the currently selected document context
+        current_doc = st.session_state.get('selected_filename', "All Documents")
+        
+        # Get the main chat history dictionary
+        chat_db = st.session_state.get('chat_history', {})
+        
+        # If this document has no history yet, create an empty list for it
+        if current_doc not in chat_db:
+            chat_db[current_doc] = []
+            
+        return chat_db[current_doc]
+
     def get_chat_history(self) -> List[Dict[str, Any]]:
-        """Get chat history from session state."""
-        import streamlit as st
-        return st.session_state.get('chat_history', [])
+        """
+        Get chat history from session state *for the currently selected document*.
+        """
+        return self._get_current_chat_list()
     
     def get_documents_count(self) -> int:
         """Get documents count from session state."""
-        import streamlit as st
         return st.session_state.get('documents_loaded', 0)
     
     def add_chat_message(self, question: str, answer: str, confidence: str, source_info: Dict):
-        """Add message to chat history with source information."""
-        import streamlit as st
-        
+        """
+        Add message to the chat history *for the currently selected document*.
+        """
         chat_entry = {
             'question': question,
             'answer': answer,
@@ -223,24 +216,32 @@ class SessionStateManager:
             'timestamp': datetime.now().isoformat()
         }
         
-        st.session_state.chat_history.append(chat_entry)
+        # Get the specific list for the current document and append to it
+        current_chat_list = self._get_current_chat_list()
+        current_chat_list.append(chat_entry)
         
-        if len(st.session_state.chat_history) > 50:
-            st.session_state.chat_history.pop(0)
+        # Prune only the current list
+        if len(current_chat_list) > 50:
+            current_chat_list.pop(0)
     
     def clear_chat_history(self):
-        """Clear chat history."""
-        import streamlit as st
-        st.session_state.chat_history = []
+        """
+        Clear chat history *only for the currently selected document*.
+        (This is called by the 'New Chat' button).
+        """
+        current_doc = st.session_state.get('selected_filename', "All Documents")
+        chat_db = st.session_state.get('chat_history', {})
+        
+        if current_doc in chat_db:
+            chat_db[current_doc] = []
+            logger.info(f"Cleared chat history for: {current_doc}")
     
     def update_documents_count(self, count: int):
         """Update documents count in session state."""
-        import streamlit as st
         st.session_state.documents_loaded = count
     
     def set_api_health(self, healthy: bool):
         """Update API health status."""
-        import streamlit as st
         st.session_state.api_healthy = healthy
 
 # Global instances

@@ -42,6 +42,16 @@ class RAGConfig:
     CHUNK_OVERLAP: int = 100       # overlap to preserve context
     TOP_K_RETRIEVAL: int = 5
     SIMILARITY_THRESHOLD: float = 0.3
+    
+    # -----------------------------------------------------------------
+    # 🚨 UPDATED CONFIG FOR PROMPT EXPERIMENTATION
+    # -----------------------------------------------------------------
+    # Name of the prompt template to use from core/prompts.py
+    # Options: "STRICT_CONTEXT_V1", "FRIENDLY_V1", "BALANCED_CONTEXT_V1", 
+    #          "HYBRID_FRIENDLY_BALANCED_V1", "CREATIVE_GROUNDED_V1"
+    RAG_PROMPT_TEMPLATE: str = os.getenv("RAG_PROMPT_TEMPLATE", "STRICT_CONTEXT_V1")
+    # -----------------------------------------------------------------
+
     EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
     EMBEDDING_DEVICE: str = "cpu"
 
@@ -49,6 +59,19 @@ class RAGConfig:
         if self.CHUNK_SIZE <= self.CHUNK_OVERLAP:
             logger.warning("RAGConfig: CHUNK_SIZE <= CHUNK_OVERLAP; adjusting overlap")
             self.CHUNK_OVERLAP = max(0, self.CHUNK_SIZE // 5)
+            
+        # Validate that the chosen prompt exists
+        try:
+            from core.prompts import PROMPT_REGISTRY
+            if self.RAG_PROMPT_TEMPLATE not in PROMPT_REGISTRY:
+                logger.error(f"❌ RAG_PROMPT_TEMPLATE '{self.RAG_PROMPT_TEMPLATE}' not found in PROMPT_REGISTRY!")
+                raise ValueError("Invalid RAG_PROMPT_TEMPLATE configured")
+        except ImportError:
+            # This might happen on initial setup, just log a warning
+            logger.warning("Could not import PROMPT_REGISTRY for validation yet.")
+        except Exception as e:
+            logger.error(f"Error validating RAG_PROMPT_TEMPLATE: {e}")
+            raise
 
 @dataclass
 class APIConfig:
@@ -118,10 +141,19 @@ class Config:
         """Initialize all configuration sections."""
         self.firebase = FirebaseConfig()
         self.model = ModelConfig()
-        self.rag = RAGConfig()
+        # RAGConfig must be initialized after prompts.py is available
+        # so we do this manually.
+        
         self.api = APIConfig()
         self.files = FileConfig()
         self.logging = LoggingConfig()
+        
+        # Setup logging first
+        self.logging.setup_logging()
+        
+        # Now initialize RAGConfig, which depends on core.prompts
+        self.rag = RAGConfig()
+        
         # Environment flags
         self.ENV = os.getenv("ENV", "development")  # "production" or "development"
         # When true, require firebase to initialize successfully at startup
@@ -130,7 +162,6 @@ class Config:
         admin_uids = os.getenv("ADMIN_USER_IDS", "")
         self.ADMIN_USER_IDS = [x.strip() for x in admin_uids.split(",") if x.strip()]
 
-        self.logging.setup_logging()
         self._validate_config()
 
     def _validate_config(self):

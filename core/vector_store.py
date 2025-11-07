@@ -1,6 +1,9 @@
 """
 Intelligent vector store with ChromaDB and optimized embedding management.
 FIXED: Added metadata sanitization and a robust fallback similarity mapping.
+ADDED: get_all_chunks_for_file for summary requests.
+FIXED: Summary dummy score changed from 99.9 to 1.0 to pass validation.
+ADDED: check_hash_exists method for duplicate file detection.
 """
 import logging
 import uuid
@@ -18,6 +21,7 @@ logger = logging.getLogger(__name__)
 class VectorStore:
     
     def __init__(self):
+        # ... (no changes)
         self.client = None
         self.collection = None
         self.embedding_model = None
@@ -25,6 +29,7 @@ class VectorStore:
         self.collection_name = "docuchat_documents"
     
     def initialize(self) -> bool:
+        # ... (no changes)
         try:
             os.environ["ANONYMIZED_TELEMETRY"] = "false"
             
@@ -58,6 +63,9 @@ class VectorStore:
             self.initialized = False
             return False
     
+    # -----------------------------------------------------------------
+    # 🚨 START: MODIFIED _sanitize_metadata
+    # -----------------------------------------------------------------
     def _sanitize_metadata(self, meta: Dict[str, Any], document_id: str, chunk_index: int, total_chunks: int) -> Dict[str, Any]:
         """
         Ensure metadata values are primitive types supported by ChromaDB.
@@ -75,13 +83,23 @@ class VectorStore:
                     sanitized[k] = str(v)
                 except Exception:
                     sanitized[k] = ""
+                    
         # Ensure essential keys exist
         sanitized["document_id"] = document_id
         sanitized["chunk_index"] = int(chunk_index)
         sanitized["total_chunks"] = int(total_chunks)
+        
+        # 🚨 Ensure file_hash is present if passed
+        if "file_hash" not in sanitized:
+            sanitized["file_hash"] = meta.get("file_hash", "")
+            
         return sanitized
+    # -----------------------------------------------------------------
+    # 🚨 END: MODIFIED _sanitize_metadata
+    # -----------------------------------------------------------------
 
     def add_documents(self, documents: List[str], metadata: List[Dict], document_id: str) -> bool:
+        # ... (no changes)
         if not self.initialized:
             logger.error("Vector store not initialized")
             return False
@@ -97,9 +115,7 @@ class VectorStore:
                 batch_docs = documents[start_idx:end_idx]
                 
                 logger.debug(f"Generating embeddings for batch {i+1}/{total_batches}")
-                # encode returns numpy array; convert to list of lists
                 batch_embeddings = self.embedding_model.encode(batch_docs, show_progress_bar=False)
-                # ensure it's a list of lists
                 if isinstance(batch_embeddings, np.ndarray):
                     batch_embeddings = batch_embeddings.tolist()
                 all_embeddings.extend(batch_embeddings)
@@ -109,22 +125,26 @@ class VectorStore:
             embeddings_list = []
             
             for i, (doc, meta, embedding) in enumerate(zip(documents, metadata, all_embeddings)):
-                # Ensure user_id exists in metadata to enforce ownership
                 if 'user_id' not in meta:
                     logger.error(f"CRITICAL: user_id missing from metadata for chunk {i} of doc {document_id}")
                     return False
                     
                 chunk_id = f"{document_id}_chunk_{i+1}"
                 ids.append(chunk_id)
-                sanitized_meta = self._sanitize_metadata(meta, document_id, i, len(documents))
+                # 🚨 We must pass the file_hash here
+                sanitized_meta = self._sanitize_metadata(
+                    meta, 
+                    document_id, 
+                    i, 
+                    len(documents)
+                )
                 metadatas.append(sanitized_meta)
-                # embedding might already be a list
+                
                 if isinstance(embedding, np.ndarray):
                     embeddings_list.append(embedding.tolist())
                 else:
                     embeddings_list.append(list(embedding))
             
-            # Use safe add parameters (explicit fields)
             self.collection.add(
                 embeddings=embeddings_list,
                 documents=documents,
@@ -140,6 +160,7 @@ class VectorStore:
             return False
     
     def _preprocess_query(self, query: str) -> str:
+        # ... (no changes)
         query_lower = query.lower().strip()
         
         query_mappings = {
@@ -159,28 +180,17 @@ class VectorStore:
         return query
 
     def _distance_to_similarity(self, distance: float, max_distance: Optional[float] = None) -> float:
-        """
-        Convert distance (L2 or arbitrary) to a bounded similarity in [0,1].
-        Use 1 / (1 + distance) mapping for robustness; if max_distance provided,
-        also apply a normalization factor.
-        """
+        # ... (no changes)
         try:
             sim = 1.0 / (1.0 + float(distance))
-            # Optionally scale by estimated max_distance to compress range
             if max_distance and max_distance > 0:
                 sim = sim * (1.0 - (min(distance, max_distance) / (max_distance + 1.0) * 0.3))
             return float(max(0.0, min(1.0, sim)))
         except Exception:
             return 0.0
 
-    # -----------------------------------------------------------------
-    # Improved search with safe fallbacks
-    # -----------------------------------------------------------------
     def search(self, query: str, user_id: str, top_k: Optional[int] = None, filename: Optional[str] = None) -> List[Tuple[str, float, Dict]]:
-        """
-        Enhanced semantic search with robust fallback mapping from distances to similarity.
-        Returns a list of tuples: (document_text, similarity_score, metadata)
-        """
+        # ... (no changes)
         if not self.initialized:
             logger.error("Vector store not initialized")
             return []
@@ -189,7 +199,6 @@ class VectorStore:
             top_k = config.rag.TOP_K_RETRIEVAL
 
         try:
-            # Build the metadata filter first
             filters = []
             filters.append({"user_id": user_id})
             
@@ -201,9 +210,6 @@ class VectorStore:
             
             where_clause = {"$and": filters} if len(filters) > 1 else filters[0]
 
-            # -----------------------------------------------------------------
-            # SMALL DOC HEURISTIC: if very few chunks exist, return them directly
-            # -----------------------------------------------------------------
             SMALL_DOC_HEURISTIC_LIMIT = 3
             all_chunks_for_filter = self.collection.get(where=where_clause, include=["metadatas", "documents"])
             total_available_chunks = len(all_chunks_for_filter.get('ids', []))
@@ -212,21 +218,16 @@ class VectorStore:
                 logger.info(f"🔄 Small document detected ({total_available_chunks} chunks). Returning all chunks.")
                 search_results = []
                 for doc, metadata in zip(all_chunks_for_filter.get('documents', []), all_chunks_for_filter.get('metadatas', [])):
-                    # Ensure doc is a string
                     doc_text = doc if isinstance(doc, str) else (str(doc) if doc is not None else "")
-                    # Forced high similarity but not absolute 1.0 (cap at 0.99)
                     search_results.append((doc_text, 0.99, metadata or {}))
                 return search_results[:top_k]
-            # -----------------------------------------------------------------
 
-            # Normal processing: embed query and ask Chroma
             processed_query = self._preprocess_query(query)
             query_embedding = self.embedding_model.encode([processed_query])
             if isinstance(query_embedding, np.ndarray):
                 query_embedding = query_embedding.tolist()
 
-            # Ask the collection for results (request more than top_k for fallback smoothing)
-            n_results = min(max(top_k * 2, 10), 200)  # reasonable bounds
+            n_results = min(max(top_k * 2, 10), 200)
             results = self.collection.query(
                 query_embeddings=query_embedding,
                 n_results=n_results,
@@ -234,7 +235,6 @@ class VectorStore:
                 where=where_clause
             )
 
-            # Validate results structure
             docs = results.get('documents', [])
             metas = results.get('metadatas', [])
             distances = results.get('distances', [])
@@ -243,7 +243,6 @@ class VectorStore:
                 logger.info("🔍 Chroma returned no documents for the query filter.")
                 return []
 
-            # distances and docs are nested lists per query
             distances_list = distances[0] if distances and distances[0] else []
             docs_list = docs[0] if docs and docs[0] else []
             metas_list = metas[0] if metas and metas[0] else []
@@ -252,29 +251,22 @@ class VectorStore:
                 logger.info("🔍 No documents in nested results.")
                 return []
 
-            # Compute fallback max_distance for mapping
             max_distance = max(distances_list) if distances_list else None
 
             search_results = []
-            # First pass: accept results with reasonable distances (if available)
             NORMAL_DISTANCE_THRESHOLD = 1.0
-            FALLBACK_DISTANCE_THRESHOLD = 2.5  # expanded fallback
+            FALLBACK_DISTANCE_THRESHOLD = 2.5
 
             for i, (doc, meta) in enumerate(zip(docs_list, metas_list)):
                 distance = distances_list[i] if i < len(distances_list) else None
                 if distance is None:
-                    # If distance missing, still consider the doc but with low confidence
                     similarity = 0.25
                 else:
-                    # Map distance -> similarity robustly
                     similarity = self._distance_to_similarity(distance, max_distance)
-                # Only append if similarity positive; we'll do final trimming/sorting
                 search_results.append((doc if isinstance(doc, str) else (str(doc) if doc is not None else ""), float(similarity), meta or {}))
 
-            # Filter out zero-similarity entries
             filtered = [r for r in search_results if r[1] > 0.0]
 
-            # If filtered empty, apply greedy fallback: take top n_results from Chroma and compute similarity mapping
             if not filtered and docs_list:
                 logger.info("🔄 No results with normal mapping—using greedy fallback top-N")
                 fallback_results = []
@@ -282,11 +274,9 @@ class VectorStore:
                     distance = distances_list[i] if i < len(distances_list) else None
                     similarity = self._distance_to_similarity(distance, max_distance) if distance is not None else 0.1
                     fallback_results.append((doc if isinstance(doc, str) else (str(doc) if doc is not None else ""), float(similarity), meta or {}))
-                # sort descending similarity
                 fallback_results.sort(key=lambda x: x[1], reverse=True)
                 return fallback_results[:top_k]
 
-            # Sort filtered by similarity descending
             filtered.sort(key=lambda x: x[1], reverse=True)
 
             logger.info(f"🔍 Search found {len(filtered)} relevant chunks for: {query[:50]}...")
@@ -296,7 +286,84 @@ class VectorStore:
             logger.error(f"❌ Search error: {str(e)}", exc_info=True)
             return []
     
+    def get_all_chunks_for_file(self, filename: str, user_id: str, limit: int = 50) -> List[Tuple[str, float, Dict]]:
+        # ... (This method now has the 1.0 dummy score fix from before)
+        if not self.initialized:
+            logger.error("Vector store not initialized")
+            return []
+        
+        try:
+            where_clause = {"$and": [
+                {"user_id": user_id},
+                {"filename": filename}
+            ]}
+            
+            results = self.collection.get(
+                where=where_clause,
+                limit=limit,
+                include=["documents", "metadatas"]
+            )
+            
+            docs_list = results.get('documents', [])
+            metas_list = results.get('metadatas', [])
+            
+            if not docs_list:
+                logger.warning(f"No chunks found for summary path: {filename}, user {user_id}")
+                return []
+            
+            summary_chunks = []
+            for doc, meta in zip(docs_list, metas_list):
+                summary_chunks.append((
+                    doc if isinstance(doc, str) else (str(doc) if doc is not None else ""),
+                    1.0, # Dummy score
+                    meta or {}
+                ))
+            
+            summary_chunks.sort(key=lambda x: x[2].get('chunk_index', 0))
+            
+            return summary_chunks
+
+        except Exception as e:
+            logger.error(f"❌ Error in get_all_chunks_for_file: {str(e)}", exc_info=True)
+            return []
+
+    # -----------------------------------------------------------------
+    # 🚨 START: NEW METHOD
+    # -----------------------------------------------------------------
+    def check_hash_exists(self, file_hash: str, user_id: str) -> bool:
+        """
+        Queries ChromaDB to see if a chunk with this hash and user_id already exists.
+        """
+        if not self.initialized:
+            return False
+        
+        try:
+            where_filter = {"$and": [
+                {"user_id": user_id},
+                {"file_hash": file_hash}
+            ]}
+            
+            results = self.collection.get(
+                where=where_filter,
+                limit=1,
+                include=[] # We only need to know if an ID exists
+            )
+            
+            if results and results.get('ids'):
+                logger.info(f"Duplicate hash {file_hash} found for user {user_id}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error in check_hash_exists: {e}")
+            return False # Fail-safe
+    # -----------------------------------------------------------------
+    # 🚨 END: NEW METHOD
+    # -----------------------------------------------------------------
+
     def get_collection_stats(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        # ... (no changes)
         if not self.initialized:
             return {"error": "Vector store not initialized"}
         
@@ -325,6 +392,7 @@ class VectorStore:
             return {"error": str(e)}
     
     def delete_document(self, document_id: str, user_id: str) -> bool:
+        # ... (no changes)
         if not self.initialized:
             return False
         
@@ -350,6 +418,7 @@ class VectorStore:
             return False
     
     def get_document_metadata(self, document_id: str, user_id: str) -> Optional[Dict]:
+        # ... (no changes)
         try:
             where_filter = {"$and": [
                 {"document_id": document_id},
@@ -364,6 +433,7 @@ class VectorStore:
             return None
 
     def list_documents_by_user(self, user_id: str) -> List[Dict[str, Any]]:
+        # ... (no changes)
         if not self.initialized:
             return []
             
@@ -391,6 +461,7 @@ class VectorStore:
             return []
 
     def reset_collection(self) -> bool:
+        # ... (no changes)
         try:
             self.client.delete_collection(self.collection_name)
             self.collection = self.client.create_collection(name=self.collection_name)
